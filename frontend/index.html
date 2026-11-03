@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ADS-B 实时地图显示</title>
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2340c4ff' d='M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z'/%3E%3C/svg%3E">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 24 24" class="brand-icon"><path fill="currentColor" d="M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z"/></svg>
+    <span class="brand-name">ADS-B <b>Display</b></span>
+    <span id="mode-badge" class="badge badge-live" title="数据模式">LIVE</span>
+    <span id="dataset-badge" class="badge badge-ds" title="数据集"></span>
+  </div>
+  <div class="searchbox">
+    <svg viewBox="0 0 24 24" class="search-icon"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14"/></svg>
+    <input id="search" type="text" placeholder="搜索 ICAO 地址 / 航班号，回车定位" autocomplete="off" spellcheck="false">
+    <button id="search-clear" title="清空" hidden>×</button>
+  </div>
+  <div id="replay-ctrl" class="replay-ctrl" hidden>
+    <button id="rp-toggle" title="播放/暂停">⏸</button>
+    <input id="rp-seek" type="range" min="0" max="100" value="0" step="1">
+    <select id="rp-speed" title="回放速度">
+      <option value="0.5">0.5×</option>
+      <option value="1" selected>1×</option>
+      <option value="2">2×</option>
+      <option value="5">5×</option>
+      <option value="10">10×</option>
+    </select>
+    <span id="rp-progress" class="rp-progress">0/0</span>
+  </div>
+  <div class="counters">
+    <div class="counter" title="当前活动航空器"><span id="cnt-ac">0</span><label>航空器</label></div>
+    <div class="counter" title="累计接收报文数"><span id="cnt-msg">0</span><label>报文</label></div>
+    <div class="counter" title="UTC 时间"><span id="clock">--:--:--</span><label>UTC</label></div>
+    <button id="btn-pause" class="sysbtn" title="暂停前端映射（后台继续采集）">⏸ 暂停显示</button>
+    <button id="btn-shutdown" class="sysbtn sysbtn-danger" title="终止前后端服务">⏻ 终止系统</button>
+  </div>
+</header>
+
+<main id="layout">
+  <aside id="sidebar">
+    <div id="list-head">
+      <span class="col callsign">航班/ICAO</span><span class="col alt">高度ft</span><span class="col gs">速kt</span><span class="col trk">航迹</span>
+    </div>
+    <div id="ac-list"></div>
+    <div id="list-empty" hidden>暂无航空器<br><small>等待报文解码…</small></div>
+  </aside>
+
+  <section id="map-wrap">
+    <div id="map"></div>
+
+    <div id="warmup-overlay" hidden>
+      <div class="wu-card">
+        <div class="wu-spinner"></div>
+        <h2>系统预热中</h2>
+        <ul id="wu-steps">
+          <li data-phase="checking_hardware"><i></i><span>正在检查物理硬件</span><em></em></li>
+          <li data-phase="initializing"><i></i><span>正在初始化启动脚本</span><em></em></li>
+          <li data-phase="collecting"><i></i><span>正在收集数据</span><em></em></li>
+          <li data-phase="ready"><i></i><span>进入实时显示</span><em></em></li>
+        </ul>
+        <p id="wu-detail">等待服务连接…</p>
+        <button id="wu-skip" class="btn" hidden>跳过，直接进入显示 →</button>
+      </div>
+    </div>
+
+    <div id="paused-banner" hidden>
+      ⏸ 前端映射已暂停 — 后台数据收集中 <button id="pb-resume">恢复显示</button>
+    </div>
+
+    <div id="infopanel" hidden>
+      <button id="ip-close" title="关闭">×</button>
+      <div class="ip-head">
+        <svg viewBox="-52 -52 104 104" class="ip-plane"><path id="ip-plane-path" fill="#40c4ff" d="M0,-46 C2,-46 4,-44 4.5,-40 L6,-18 L44,2 L44,10 L6,-2 L4.5,22 L16,32 L16,38 L0,34 L-16,38 L-16,32 L-4.5,22 L-6,-2 L-44,10 L-44,2 L-6,-18 L-4.5,-40 C-4,-44 -2,-46 0,-46 Z"/></svg>
+        <div>
+          <div id="ip-callsign" class="ip-callsign">------</div>
+          <div class="ip-sub"><span id="ip-hex" class="mono">hex</span>
+            <span id="ip-squawk" class="chip">squawk</span>
+            <span id="ip-cat" class="chip" hidden></span>
+            <span id="ip-srctype" class="chip chip-dim"></span>
+          </div>
+        </div>
+      </div>
+      <div class="ip-grid">
+        <div class="cell"><label>气压高度</label><b id="ip-altb">—</b></div>
+        <div class="cell"><label>几何高度</label><b id="ip-altg">—</b></div>
+        <div class="cell"><label>地速</label><b id="ip-gs">—</b></div>
+        <div class="cell"><label>垂直速率</label><b id="ip-vr">—</b></div>
+        <div class="cell"><label>航迹</label><b id="ip-trk">—</b></div>
+        <div class="cell"><label>磁航向</label><b id="ip-hdg">—</b></div>
+        <div class="cell"><label>马赫/IAS</label><b id="ip-mach">—</b></div>
+        <div class="cell"><label>选择高度 MCP</label><b id="ip-mcp">—</b></div>
+        <div class="cell wide"><label>位置 (WGS-84)</label><b id="ip-pos" class="mono">—</b></div>
+        <div class="cell"><label>距离/方位</label><b id="ip-dst">—</b></div>
+        <div class="cell"><label>信号 RSSI</label><b id="ip-rssi">—</b></div>
+        <div class="cell"><label>报文数</label><b id="ip-msgs">—</b></div>
+        <div class="cell"><label>更新</label><b id="ip-seen">—</b></div>
+        <div class="cell"><label>轨迹点</label><b id="ip-trackpts">—</b></div>
+      </div>
+      <div class="ip-actions">
+        <button id="ip-follow" class="btn">⊘ 跟随追踪</button>
+        <button id="ip-center" class="btn">⌖ 定位到中心</button>
+      </div>
+    </div>
+
+    <div id="shutdown-modal" hidden>
+      <div class="sd-card">
+        <h3>终止系统？</h3>
+        <p>将停止前端服务、后端与 RTL-SDR 采集。<br>本次已采集的数据已自动保存到 data/。</p>
+        <div class="sd-actions">
+          <button id="sd-cancel" class="btn">取消</button>
+          <button id="sd-confirm" class="btn sd-danger">确认终止</button>
+        </div>
+      </div>
+    </div>
+    <div id="shutdown-done" hidden>
+      <div class="sd-card">
+        <h3>✔ 系统已终止</h3>
+        <p>服务与采集均已停止，本次数据已保存。<br>本页面已断开连接，可以关闭此标签页。</p>
+      </div>
+    </div>
+
+    <div id="map-legend">
+      <span class="lg"><i style="background:#eceff1"></i>地面</span>
+      <span class="lg"><i style="background:#00e676"></i>≤10k</span>
+      <span class="lg"><i style="background:#ffd600"></i>≤20k</span>
+      <span class="lg"><i style="background:#ff9100"></i>≤30k</span>
+      <span class="lg"><i style="background:#ff5252"></i>≤40k</span>
+      <span class="lg"><i style="background:#d500f9"></i>&gt;40k</span>
+    </div>
+  </section>
+</main>
+
+<footer id="statusbar">
+  <span id="sse-dot" class="dot dot-off"></span><span id="sse-text">连接中…</span>
+  <span class="sep">|</span><span id="st-mode">—</span>
+  <span class="sep">|</span><span id="st-src">—</span>
+  <span class="sep">|</span><span id="st-upd">—</span>
+  <span class="grow"></span>
+  <span class="dim">底图 高德地图(GCJ-02) · 坐标已做 WGS-84→GCJ-02 显示校正 · 数据 WGS-84</span>
+</footer>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script src="js/gcj02.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

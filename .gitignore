@@ -1,0 +1,18 @@
+# ---- 运行时数据（采集的数据集不入库，运行时自动重建目录）----
+data/
+logs/
+nohup.out
+
+# ---- Python ----
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- 编辑器 / 操作系统 ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 注意：frontend/vendor/ 有意保留在库中（Leaflet 本地化，离线可用）
