@@ -114,6 +114,12 @@ class ReplayDataset:
 
 
 _TRACKS_RE = re.compile(r"^tracks-.*\.jsonl$")
+_HIST_NUM_RE = re.compile(r"history_(\d+)\.json$")
+
+
+def _history_sort_key(p: Path) -> int:
+    m = _HIST_NUM_RE.search(p.name)
+    return int(m.group(1)) if m else 0
 
 
 def scan_replay_datasets(data_root: Path | None = None) -> list[ReplayDataset]:
@@ -126,11 +132,15 @@ def scan_replay_datasets(data_root: Path | None = None) -> list[ReplayDataset]:
         if not d.is_dir():
             continue
         tracks_files = sorted((d / "logs").glob("tracks-*.jsonl")) if (d / "logs").is_dir() else []
-        history_files = sorted((d / "live").glob("history_*.json")) if (d / "live").is_dir() else []
+        history_files = sorted((d / "live").glob("history_*.json"), key=_history_sort_key) if (d / "live").is_dir() else []
         if tracks_files:
             files = tracks_files
             kind = "tracks"
         elif history_files:
+            # 仅当 history 文件中确实包含有效航空器记录时才作为可回放候选
+            has_records = any('"hex"' in f.read_text(encoding="utf-8", errors="ignore") for f in history_files)
+            if not has_records:
+                continue
             files = history_files
             kind = "history"
         else:

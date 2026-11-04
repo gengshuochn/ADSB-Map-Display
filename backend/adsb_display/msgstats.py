@@ -29,15 +29,11 @@ for _i in range(256):
 
 
 def mode_s_crc(data: bytes) -> int:
-    """计算 Mode-S 报文（5/7/14 字节）的 24 位 CRC。"""
+    """计算 Mode-S 报文（5/7/14 字节）的 24 位 CRC（查表快速算法）。"""
     crc = 0
     for b in data:
-        crc ^= b << 16
-        for _ in range(8):
-            if crc & 0x800000:
-                crc = ((crc << 1) ^ _CRC_POLY) & 0xFFFFFF
-            else:
-                crc = (crc << 1) & 0xFFFFFF
+        idx = ((crc >> 16) ^ b) & 0xFF
+        crc = ((crc << 8) ^ _CRC_TABLE[idx]) & 0xFFFFFF
     return crc
 
 

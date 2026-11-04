@@ -44,6 +44,7 @@ class Warmup:
             self._completed.add(self.phase)
             self.phase = phase
             self.detail = detail
+            self.error = None  # 推进到新阶段时清除暂态错误
             self._phase_since = now
 
     def set_error(self, error: str) -> None:

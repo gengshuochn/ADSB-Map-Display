@@ -43,8 +43,9 @@ def pick_replay_dataset(name: str | None):
     if not cands:
         return None
     if name:
+        clean_name = name.strip("/ ").split("/")[-1]
         for c in cands:
-            if c.name == name:
+            if c.name == clean_name:
                 return c
         raise SystemExit(f"未找到可回放数据集: {name}（可用: {[c.name for c in cands]}）")
     # 默认选字节量最大的（数据最丰富）

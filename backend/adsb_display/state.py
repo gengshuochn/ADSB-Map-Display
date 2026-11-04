@@ -141,13 +141,17 @@ class AircraftStore:
     def prune(self, now: float | None = None) -> None:
         now = now if now is not None else self._now()
         with self._lock:
-            drop_a = [h for h, t in self.last_seen.items() if now - t > config.AIRCRAFT_DROP_S]
-            for h in drop_a:
-                self.aircraft.pop(h, None)
-                self.last_seen.pop(h, None)
+            # 1. 超过 TRACK_KEEP_S（30 分钟）清理轨迹与最后出现时间记录
             drop_t = [h for h, t in self.last_seen.items() if now - t > config.TRACK_KEEP_S]
             for h in drop_t:
                 self.tracks.pop(h, None)
+                self.last_seen.pop(h, None)
+            # 2. 超过 AIRCRAFT_DROP_S（75 秒）从活动航空器列表移除
+            drop_a = [h for h, t in self.last_seen.items() if now - t > config.AIRCRAFT_DROP_S]
+            for h in drop_a:
+                self.aircraft.pop(h, None)
+                if h not in self.tracks:
+                    self.last_seen.pop(h, None)
 
     def _now(self) -> float:
         import time

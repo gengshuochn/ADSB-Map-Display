@@ -112,13 +112,14 @@
   function upsertMarker(hex, rec, color) {
     if (rec.lat == null || rec.lon == null) return;
     const g = GCJ.wgs2gcj(rec.lat, rec.lon);
-    const showLabel = map.getZoom() >= 9 && (rec.flight || rec.hex);
+    const showLabel = map.getZoom() >= 9;
+    const labelText = showLabel ? (rec.flight || hex.toUpperCase()) : '';
     const stale = (rec.age != null && rec.age > 30);
     let m = S.markers.get(hex);
     if (!m) {
       m = L.marker(g, {
         icon: L.divIcon({
-          className: 'plane-icon', html: planeIconHtml(color, showLabel ? (rec.flight || hex.toUpperCase()) : '', stale),
+          className: 'plane-icon', html: planeIconHtml(color, labelText, stale),
           iconSize: [34, 34], iconAnchor: [17, 17],
         }),
         rotationAngle: 0, keyboard: false, riseOnHover: true,
@@ -126,16 +127,21 @@
       }).addTo(map);
       m.on('click', () => selectHex(hex, { pan: false }));
       S.markers.set(hex, m);
-      m._color = color; m._label = showLabel; m._stale = stale; m._track = rec.track;
+      m._color = color; m._label = labelText; m._stale = stale; m._track = rec.track;
     } else {
       m.setLatLng(g);
-      if (m._color !== color || m._label !== showLabel || m._stale !== stale || m._track !== rec.track) {
+      if (m._color !== color || m._label !== labelText || m._stale !== stale) {
         m.setIcon(L.divIcon({
-          className: 'plane-icon', html: planeIconHtml(color, showLabel ? (rec.flight || hex.toUpperCase()) : '', stale),
+          className: 'plane-icon', html: planeIconHtml(color, labelText, stale),
           iconSize: [34, 34], iconAnchor: [17, 17],
         }));
-        m._color = color; m._label = showLabel; m._stale = stale;
+        m._color = color; m._label = labelText; m._stale = stale;
+        if (hex === S.selected) {
+          const el = m.getElement();
+          if (el) el.classList.add('is-selected');
+        }
       }
+      m._track = rec.track;
     }
     // 旋转内层元素（不干扰 Leaflet 的定位 transform）
     const el = m.getElement();
@@ -167,6 +173,9 @@
     if (S.selected === hex) {
       if (S.selTrack) { map.removeLayer(S.selTrack); S.selTrack = null; }
       S.selTrackCount = -1;
+      S.selected = null; // 清除已移除飞机的选中状态，防止幽灵航迹
+      $('ip-callsign').textContent = '（已失联）';
+      $('ip-seen').textContent = '—';
     }
   }
 
@@ -175,6 +184,10 @@
   // ------------------------------------------------------------------
   function selectHex(hex, opts) {
     opts = opts || {};
+    if (S.selected !== hex && S.selTrack) {
+      map.removeLayer(S.selTrack);
+      S.selTrack = null;
+    }
     S.selected = hex;
     S.selTrackCount = -1;
     $('infopanel').hidden = false;
@@ -208,7 +221,11 @@
     fetch('/api/track?hex=' + encodeURIComponent(S.selected))
       .then((r) => r.json())
       .then((trk) => {
-        if (!trk || trk.count === 0) { $('ip-trackpts').textContent = '0'; return; }
+        if (!trk || trk.count === 0) {
+          $('ip-trackpts').textContent = '0';
+          if (S.selTrack) { map.removeLayer(S.selTrack); S.selTrack = null; }
+          return;
+        }
         if (S.selected !== trk.hex) return;
         if (!force && trk.count === S.selTrackCount) return;
         S.selTrackCount = trk.count;
@@ -435,9 +452,17 @@
     }
     if (wu.phase === 'ready') {
       // 就绪后保留 1.2s 过渡再淡出
-      if (!wuDoneAt) wuDoneAt = Date.now();
-      if (Date.now() - wuDoneAt > 1200) { overlay.hidden = true; wuVisible = false; }
-      else overlay.hidden = false;
+      if (!wuDoneAt) {
+        wuDoneAt = Date.now();
+        setTimeout(() => {
+          overlay.hidden = true;
+          wuVisible = false;
+        }, 1200);
+      }
+      if (Date.now() - wuDoneAt > 1200) {
+        overlay.hidden = true;
+        wuVisible = false;
+      }
     } else {
       wuDoneAt = 0;
       overlay.hidden = false;
@@ -453,14 +478,26 @@
   // 无横幅：仅按钮图标/文字切换（⏸ 暂停显示 ↔ ▶ 恢复显示）
   function updatePausedBanner(paused) {
     const btn = $('btn-pause');
-    btn.classList.toggle('paused', paused);
-    btn.textContent = paused ? '▶ 恢复显示' : '⏸ 暂停显示';
-    btn.title = paused ? '恢复前端映射（后台采集未中断）' : '暂停前端映射（后台继续采集）';
+    if (S.mode === 'replay') {
+      const srcPaused = S.status && S.status.source && S.status.source.paused;
+      btn.classList.toggle('paused', !!srcPaused);
+      btn.textContent = srcPaused ? '▶ 恢复回放' : '⏸ 暂停回放';
+      btn.title = srcPaused ? '恢复回放进度' : '暂停回放进度';
+    } else {
+      btn.classList.toggle('paused', paused);
+      btn.textContent = paused ? '▶ 恢复显示' : '⏸ 暂停显示';
+      btn.title = paused ? '恢复前端映射（后台采集未中断）' : '暂停前端映射（后台继续采集）';
+    }
   }
 
   $('btn-pause').addEventListener('click', () => {
-    const paused = S.status && S.status.display_paused;
-    post(paused ? '/api/display/resume' : '/api/display/pause');
+    if (S.mode === 'replay') {
+      const paused = S.status && S.status.source && S.status.source.paused;
+      post(paused ? '/api/replay/resume' : '/api/replay/pause');
+    } else {
+      const paused = S.status && S.status.display_paused;
+      post(paused ? '/api/display/resume' : '/api/display/pause');
+    }
   });
 
   $('btn-shutdown').addEventListener('click', () => { $('shutdown-modal').hidden = false; });
@@ -520,11 +557,11 @@
     if (e.key !== 'Enter') return;
     const q = S.search.trim().toLowerCase();
     if (!q) return;
-    // 精确 hex 优先，其次航班号前缀
+    // 精确 hex 优先，其次包含匹配航班号/hex（与列表过滤规则保持一致）
     let hit = null;
     for (const rec of S.aircraft.values()) {
       if (rec.hex.toLowerCase() === q) { hit = rec; break; }
-      if (!hit && ((rec.flight || '').toLowerCase().startsWith(q) || rec.hex.toLowerCase().startsWith(q))) hit = rec;
+      if (!hit && ((rec.flight || '').toLowerCase().includes(q) || rec.hex.toLowerCase().includes(q))) hit = rec;
     }
     if (hit) { selectHex(hit.hex, { pan: true }); searchInput.blur(); }
   });
@@ -578,20 +615,26 @@
     if (S.shutdown) return;
     const es = new EventSource('/api/stream');
     S.sse = es;
-    es.onopen = () => setConn(true);
+    es.onopen = () => {
+      setConn(true);
+      failCount = 0;
+    };
     es.onmessage = (ev) => {
       try {
         setConn(true);
+        failCount = 0;
         handleState(JSON.parse(ev.data));
       } catch (e) { console.error('bad sse payload', e); }
     };
     es.onerror = () => {
       setConn(false);
       if (S.shutdown) { es.close(); return; }
-      if (es.readyState === EventSource.CLOSED) {
-        failCount++;
-        if (failCount >= 3) { es.close(); startPolling(); }
-        else setTimeout(connectSSE, 2000);
+      failCount++;
+      if (failCount >= 3) {
+        es.close();
+        startPolling();
+      } else if (es.readyState === EventSource.CLOSED) {
+        setTimeout(connectSSE, 2000);
       }
     };
   }

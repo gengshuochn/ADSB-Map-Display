@@ -60,7 +60,7 @@ class LiveCollector:
             "--dump-beast", f"{self.ds.beast},3600,10",
             "--net",
             "--net-bind-address", "127.0.0.1",
-            "--net-ro-port", "30002",
+            "--net-ro-port", str(config.READSB_RAW_PORT),
             "--net-sbs-port", "30003",
             "--net-bo-port", "30005",
             "--net-json-port", "30102",
@@ -77,14 +77,14 @@ class LiveCollector:
 
     def _spawn(self) -> bool:
         try:
-            lf = open(self.readsb_log, "ab")
-            self.proc = subprocess.Popen(
-                self._readsb_cmd(),
-                stdout=lf,
-                stderr=lf,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            with open(self.readsb_log, "ab") as lf:
+                self.proc = subprocess.Popen(
+                    self._readsb_cmd(),
+                    stdout=lf,
+                    stderr=lf,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
             log.info("readsb 已启动 pid=%s (gain=%s lat=%.5f lon=%.5f)", self.proc.pid, self.gain, self.lat, self.lon)
             return True
         except Exception as e:  # noqa: BLE001

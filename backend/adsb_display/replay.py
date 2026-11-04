@@ -47,10 +47,22 @@ class ReplaySource:
 
     @staticmethod
     def _parse_file(path: Path) -> list[list[dict]]:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        if not text:
+            return []
+        # 1. 尝试直接作为整体 JSON 对象解析（如 readsb 的 history_*.json）
+        try:
+            doc = json.loads(text)
+            if isinstance(doc, dict) and "aircraft" in doc:
+                recs = [a for a in doc["aircraft"] if isinstance(a, dict)]
+                return [recs] if recs else []
+        except json.JSONDecodeError:
+            pass
+
+        # 2. 逐行解析：支持批次化 jsonl（{"now":..., "aircraft":[...]}）或平铺格式（每行一个 aircraft）
         batches: list[list[dict]] = []
         flat_cur: list[dict] = []
         flat_hexes: set[str] = set()
-        text = path.read_text(encoding="utf-8", errors="replace")
         for line in text.splitlines():
             line = line.strip()
             if not line:
@@ -112,7 +124,26 @@ class ReplaySource:
         total = len(self.batches)
         if total == 0:
             return
-        self._batch_index = max(0, min(total - 1, idx))
+        target = max(0, min(total - 1, idx))
+        with self._cond:
+            prev = self._batch_index
+            self._batch_index = target
+            # 若向后跳转（Seek Backward）或跳转幅度较大，重置状态库并重放累积状态
+            if target < prev and self.on_reset:
+                try:
+                    self.on_reset()
+                    if self.on_batch:
+                        # 快速重放目标点前最近 75 秒（AIRCRAFT_DROP_S）内的批次，确保目标时刻视野准确
+                        start_j = max(0, target - 75)
+                        for j in range(start_j, target + 1):
+                            self.on_batch(self.batches[j], self._t0 + j)
+                except Exception:  # noqa: BLE001
+                    log.exception("Seek 状态重置异常")
+            elif self._paused and self.on_batch:
+                try:
+                    self.on_batch(self.batches[target], self._t0 + target)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def current_time(self) -> float:
         """回放时钟：随批次推进（1 批 = 1 秒回放时间）。"""
