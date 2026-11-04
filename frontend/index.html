@@ -65,13 +65,38 @@
   <div><button id="banner-resume" class="btn">继续显示</button><button id="banner-mode" class="btn">切换模式</button></div>
 </div>
 <main id="layout">
+  <div id="sidebar-frame">
+    <div id="sidebar-clip">
   <aside id="sidebar">
+    <div class="sidebar-tabs" role="tablist" aria-label="侧栏视图">
+      <button id="tab-flights" role="tab" aria-selected="true" aria-controls="flights-panel">活动航班</button>
+      <button id="tab-situation" role="tab" aria-selected="false" aria-controls="situation-panel" tabindex="-1">空域态势</button>
+    </div>
+    <div id="flights-panel" class="sidebar-page" role="tabpanel" aria-labelledby="tab-flights">
     <div id="list-head">
       <span class="col callsign">航班/ICAO</span><span class="col alt">高度ft</span><span class="col gs">速kt</span><span class="col trk">航迹</span>
     </div>
     <div id="ac-list"></div>
     <div id="list-empty" hidden>暂无航空器<br><small>等待报文解码…</small></div>
+    </div>
+    <div id="situation-panel" class="sidebar-page" role="tabpanel" aria-labelledby="tab-situation" hidden>
+      <h3>接收站参数</h3>
+      <div class="stat-grid">
+        <div class="stat-card wide"><label>站点位置 · WGS-84</label><b id="stat-position">—</b></div>
+        <div class="stat-card"><label>天线增益</label><b id="stat-gain">—</b></div>
+        <div class="stat-card"><label>最大作用距离</label><b id="stat-range">—</b></div>
+        <div class="stat-card wide"><label>解算链路</label><b id="stat-source">—</b></div>
+      </div>
+      <h3>总台监控</h3>
+      <div class="stat-grid">
+        <div class="stat-card"><label>在听航空器</label><b id="stat-count">0</b></div>
+        <div class="stat-card"><label>最远航空器</label><b id="stat-distance">—</b></div>
+      </div>
+    </div>
   </aside>
+    </div>
+    <button id="sidebar-toggle" aria-label="收起侧栏" aria-expanded="true" aria-controls="sidebar">‹</button>
+  </div>
 
   <section id="map-wrap">
     <div id="map"></div>

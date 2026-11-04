@@ -365,9 +365,9 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 /* ---------------- 状态栏 ---------------- */
 #statusbar {
-  height: 26px; flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  height: 34px; flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
   padding: 0 12px; background: var(--surface); border-top: 1px solid var(--line);
-  font-size: 11.5px; color: var(--muted); z-index: 1200;
+  font-size: 14px; color: var(--muted); z-index: 1200;
   transition: background-color .25s ease, border-color .25s ease;
 }
 #statusbar .sep { opacity: .4; }
@@ -417,3 +417,34 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 #pause-banner.visible { max-height: 140px; padding: 8px 16px; opacity: 1; transform: translateY(0); pointer-events: auto; visibility: visible; border-bottom-width: 1px; }
 #pause-banner > div { display: flex; gap: 8px; flex-shrink: 0; }
 #dataset-badge { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 侧栏外框负责真实布局宽度，内容裁切后地图能完整占用释放的空间。 */
+:root { --sidebar-width: 320px; --ui-zoom: 1; }
+#layout { position: relative; }
+#sidebar-frame { position: relative; width: calc(var(--sidebar-width) * var(--ui-zoom)); min-width: 0; flex: 0 0 auto; transition: width .25s ease; z-index: 1300; }
+#sidebar-frame.collapsed { width: 0; }
+#sidebar-clip { height: 100%; overflow: hidden; }
+#sidebar { width: var(--sidebar-width); height: 100%; transition: transform .25s ease, background-color .25s ease, border-color .25s ease; }
+#sidebar-frame.collapsed #sidebar { transform: translateX(-100%); }
+#sidebar-toggle { position: absolute; right: calc(-22px * var(--ui-zoom)); top: 50%; transform: translateY(-50%); width: calc(22px * var(--ui-zoom)); height: calc(48px * var(--ui-zoom)); font-size: calc(24px * var(--ui-zoom)); color: var(--fg); background: var(--surface); border: 1px solid var(--line); border-left: 0; border-radius: 0 8px 8px 0; cursor: pointer; }
+.sidebar-tabs { display: flex; flex: 0 0 auto; border-bottom: 1px solid var(--line); }
+.sidebar-tabs button { flex: 1; padding: 13px 8px; background: transparent; color: var(--muted); border: 0; border-bottom: 2px solid transparent; font: inherit; cursor: pointer; }
+.sidebar-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); background: var(--accent-soft); }
+.sidebar-page { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.sidebar-page[hidden] { display: none; }
+#situation-panel { padding: 14px; overflow-y: auto; }
+#situation-panel h3 { font-size: 13px; color: var(--muted); margin: 8px 0 12px; }
+.stat-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.stat-card { padding: 13px 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; }
+.stat-card.wide { grid-column: 1 / -1; }
+.stat-card label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+.stat-card b { font-size: 19px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.stat-card.wide b { font-size: 14px; }
+.home-button { width: 30px; height: 30px; background: var(--surface); color: var(--fg); border: none; border-radius: 4px; font-size: 24px; cursor: pointer; }
+.home-button:hover { background: var(--surface-2); }
+.home-button:disabled { opacity: .5; cursor: default; }
+#statusbar { gap: 10px; white-space: nowrap; min-width: 0; }
+#statusbar > span { flex-shrink: 0; }
+#statusbar #st-src, #statusbar .dim { flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#statusbar .dim { opacity: 1; }
+@media (max-width: 900px) { :root { --sidebar-width: 240px; } }

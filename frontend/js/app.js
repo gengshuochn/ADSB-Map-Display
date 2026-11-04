@@ -58,6 +58,8 @@
   function initReceiverView(lat, lon, maxRangeKm) {
     S.receiver = [lat, lon];
     S.maxRangeKm = maxRangeKm || 500;
+    const home = document.querySelector('.home-button');
+    if (home) home.disabled = false;
     const g = GCJ.wgs2gcj(lat, lon);
     if (!rxMarker) {
       rxMarker = L.marker(g, {
@@ -73,6 +75,27 @@
       rxMarker.setLatLng(g); rxRing.setLatLng(g); rxRing.setRadius(S.maxRangeKm * 1000);
     }
   }
+
+  const HomeControl = L.Control.extend({
+    options: { position: 'topright' },
+    onAdd() {
+      const container = L.DomUtil.create('div', 'leaflet-bar home-control');
+      const btn = L.DomUtil.create('button', 'home-button', container);
+      btn.type = 'button'; btn.textContent = '⌖'; btn.title = '回到接收站（保持缩放级别）';
+      btn.setAttribute('aria-label', '回到接收站'); btn.disabled = !rxMarker;
+      L.DomEvent.disableClickPropagation(container);
+      L.DomEvent.disableScrollPropagation(container);
+      btn.addEventListener('click', () => {
+        if (!rxMarker) return;
+        S.follow = false;
+        $('ip-follow').classList.remove('active');
+        $('ip-follow').textContent = '⊘ 跟随追踪';
+        map.panTo(rxMarker.getLatLng());
+      });
+      return container;
+    },
+  });
+  new HomeControl().addTo(map);
 
   // ------------------------------------------------------------------
   // 工具
@@ -351,6 +374,49 @@
     $('cnt-ac').textContent = String(S.aircraft.size);
   }
 
+  function updateSituation() {
+    const receiver = (S.status && S.status.receiver) || {};
+    $('stat-position').textContent = Number.isFinite(receiver.lat) && Number.isFinite(receiver.lon)
+      ? receiver.lat.toFixed(5) + ', ' + receiver.lon.toFixed(5) : '—';
+    $('stat-gain').textContent = fmtNum(receiver.gain, ' dB', 1);
+    $('stat-range').textContent = fmtNum(receiver.max_range_km, ' km', 0);
+    $('stat-source').textContent = receiver.source || '—';
+    $('stat-count').textContent = String(S.aircraft.size);
+    let farthest = null;
+    for (const rec of S.aircraft.values()) {
+      if (Number.isFinite(rec.dist_km)) farthest = Math.max(farthest ?? 0, rec.dist_km);
+    }
+    $('stat-distance').textContent = farthest === null ? '—' : farthest.toFixed(1) + ' km';
+  }
+  ['flights', 'situation'].forEach((tab) => {
+    $('tab-' + tab).addEventListener('click', () => {
+      ['flights', 'situation'].forEach((name) => {
+        const active = tab === name;
+        $(name + '-panel').hidden = !active;
+        $('tab-' + name).setAttribute('aria-selected', String(active));
+        $('tab-' + name).tabIndex = active ? 0 : -1;
+      });
+    });
+    $('tab-' + tab).addEventListener('keydown', (e) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+      const other = $('tab-' + (tab === 'flights' ? 'situation' : 'flights'));
+      other.click(); other.focus(); e.preventDefault();
+    });
+  });
+  function setSidebar(collapsed) {
+    $('sidebar-frame').classList.toggle('collapsed', collapsed);
+    $('sidebar-toggle').textContent = collapsed ? '›' : '‹';
+    $('sidebar-toggle').setAttribute('aria-expanded', String(!collapsed));
+    $('sidebar-toggle').setAttribute('aria-label', collapsed ? '展开侧栏' : '收起侧栏');
+    $('sidebar').inert = collapsed;
+    try { localStorage.setItem('adsb-sidebar', collapsed ? 'collapsed' : 'expanded'); } catch (e) {}
+  }
+  $('sidebar-toggle').addEventListener('click', () => setSidebar(!$('sidebar-frame').classList.contains('collapsed')));
+  $('sidebar-frame').addEventListener('transitionend', (e) => {
+    if (e.target === $('sidebar-frame') && e.propertyName === 'width') map.invalidateSize({ pan: false });
+  });
+  try { setSidebar(localStorage.getItem('adsb-sidebar') === 'collapsed'); } catch (e) {}
+
   // ------------------------------------------------------------------
   // 状态处理主入口（每秒一次）
   // ------------------------------------------------------------------
@@ -406,6 +472,7 @@
 
     updateList();
     updateInfoPanel();
+    updateSituation();
     if (S.selected) refreshSelectedTrack(false);
     if (S.follow && S.selected) {
       const rec = S.aircraft.get(S.selected);
@@ -804,7 +871,7 @@
     $('clock').textContent = renderClock(); // 立即刷新，避免最长 0.5s 延迟
   });
   function renderClock() {
-    const d = new Date();
+    const d = new Date(S.mode === 'replay' && S.displayNow ? S.displayNow * 1000 : Date.now());
     const pad = (n) => String(n).padStart(2, '0');
     if (clockUtc) {
       return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
