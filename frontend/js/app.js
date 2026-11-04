@@ -48,7 +48,7 @@
     { subdomains: '1234', maxZoom: 18, opacity: 0.9 });
 
   streetLayer.addTo(map);
-  L.control.layers({ '暗色街道': streetLayer, '卫星影像': satLayer }, { '卫星路网注记': satLabelLayer }, { collapsed: true }).addTo(map);
+  L.control.layers({ '街道地图': streetLayer, '卫星影像': satLayer }, { '卫星路网注记': satLabelLayer }, { collapsed: true }).addTo(map);
 
   let rxMarker = null, rxRing = null;
 
@@ -62,7 +62,7 @@
         interactive: false, zIndexOffset: -100,
       }).addTo(map);
       rxRing = L.circle(g, {
-        radius: S.maxRangeKm * 1000, color: '#40c4ff', weight: 1, opacity: 0.25,
+        radius: S.maxRangeKm * 1000, weight: 1, opacity: 0.3, className: 'rx-ring',
         dashArray: '6 8', fill: false, interactive: false,
       }).addTo(map);
       if (!S.viewInit) { map.setView(g, 8); S.viewInit = true; }
@@ -199,7 +199,7 @@
   function updateSelectionVisual() {
     for (const [hx, m] of S.markers) {
       const el = m.getElement();
-      if (el) el.style.filter = (hx === S.selected) ? 'drop-shadow(0 0 6px #fff)' : '';
+      if (el) el.classList.toggle('is-selected', hx === S.selected);
     }
   }
 
@@ -216,7 +216,7 @@
           .filter((p) => p[1] != null && p[2] != null)
           .map((p) => GCJ.wgs2gcj(p[1], p[2]));
         if (!S.selTrack) {
-          S.selTrack = L.polyline(latlngs, { color: '#40c4ff', weight: 2.5, opacity: 0.9, interactive: false }).addTo(map);
+          S.selTrack = L.polyline(latlngs, { className: 'sel-track', weight: 2.5, opacity: 0.9, interactive: false }).addTo(map);
           S.selTrack.bringToBack();
         } else {
           S.selTrack.setLatLngs(latlngs);
@@ -323,9 +323,11 @@
   // ------------------------------------------------------------------
   function handleState(st) {
     S.lastUpdate = Date.now();
-    // 暂停心跳：只更新指示，不覆盖数据
+    // 暂停心跳：只同步暂停指示，不覆盖数据
     if (st.heartbeat && st.status && st.status.display_paused) {
       setConn(true);
+      if (S.status) S.status.display_paused = true; // 供按钮点击判定当前暂停态
+      updatePausedBanner(true);
       $('st-upd').textContent = '映射已暂停（后台采集中）';
       return;
     }
@@ -346,9 +348,8 @@
       $('st-mode').textContent = S.mode === 'live' ? '实时采集 (RTL-SDR + readsb)' : '数据集回放';
     }
 
-    // 预热遮罩（仅 live 模式）
+    // 暂停指示（仅按钮图标切换，无横幅）
     if (S.mode === 'live') updateWarmup(st.status.warmup);
-    // 暂停横幅
     updatePausedBanner(st.status.display_paused === true);
 
     // 活动集
@@ -383,7 +384,9 @@
       if (src.last_error) txt += ` · ${src.last_error}`;
       $('st-src').textContent = txt;
       $('st-src').style.color = src.running ? '' : 'var(--err)';
-      $('cnt-msg').textContent = String(src.messages || 0);
+      // 报文计数：后端实际采集的 DF17 且 CRC 校验通过报文
+      const ms = st.msgstats || {};
+      $('cnt-msg').textContent = String(ms.messages_df17 != null ? ms.messages_df17 : 0);
     } else {
       $('st-src').textContent = `${src.dataset || ''} · ${src.batch_index || 0}/${src.total_batches || 0} 批 · ${src.speed || 1}×` +
         (src.paused ? ' · 已暂停' : '');
@@ -447,18 +450,18 @@
   // ------------------------------------------------------------------
   // 暂停显示 / 终止系统
   // ------------------------------------------------------------------
+  // 无横幅：仅按钮图标/文字切换（⏸ 暂停显示 ↔ ▶ 恢复显示）
   function updatePausedBanner(paused) {
-    $('paused-banner').hidden = !paused;
     const btn = $('btn-pause');
     btn.classList.toggle('paused', paused);
     btn.textContent = paused ? '▶ 恢复显示' : '⏸ 暂停显示';
+    btn.title = paused ? '恢复前端映射（后台采集未中断）' : '暂停前端映射（后台继续采集）';
   }
 
   $('btn-pause').addEventListener('click', () => {
     const paused = S.status && S.status.display_paused;
     post(paused ? '/api/display/resume' : '/api/display/pause');
   });
-  $('pb-resume').addEventListener('click', () => post('/api/display/resume'));
 
   $('btn-shutdown').addEventListener('click', () => { $('shutdown-modal').hidden = false; });
   $('sd-cancel').addEventListener('click', () => { $('shutdown-modal').hidden = true; });
@@ -595,15 +598,35 @@
   let failCount = 0;
 
   // ------------------------------------------------------------------
-  // 时钟与初始元数据
+  // 主题切换（浅色 / 深色，localStorage 持久化）
   // ------------------------------------------------------------------
-  setInterval(() => {
+  $('btn-theme').addEventListener('click', () => {
+    const root = document.documentElement;
+    const next = root.dataset.theme === 'light' ? 'dark' : 'light';
+    root.dataset.theme = next;
+    try { localStorage.setItem('adsb-theme', next); } catch (e) { /* 隐私模式忽略 */ }
+  });
+
+  // ------------------------------------------------------------------
+  // 时钟（UTC / 北京时间点击切换）与初始元数据
+  // ------------------------------------------------------------------
+  const clockBox = $('clock-box');
+  let clockUtc = true; // true: UTC；false: 北京时间（Asia/Shanghai, UTC+8）
+  clockBox.addEventListener('click', () => {
+    clockUtc = !clockUtc;
+    $('clock-label').textContent = clockUtc ? 'UTC' : '北京时间';
+    $('clock').textContent = renderClock(); // 立即刷新，避免最长 0.5s 延迟
+  });
+  function renderClock() {
     const d = new Date();
-    $('clock').textContent =
-      String(d.getUTCHours()).padStart(2, '0') + ':' +
-      String(d.getUTCMinutes()).padStart(2, '0') + ':' +
-      String(d.getUTCSeconds()).padStart(2, '0');
-  }, 500);
+    const pad = (n) => String(n).padStart(2, '0');
+    if (clockUtc) {
+      return pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
+    }
+    return pad((d.getUTCHours() + 8) % 24) + ':' +
+      pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds());
+  }
+  setInterval(() => { $('clock').textContent = renderClock(); }, 500);
 
   map.on('zoomend', () => {
     // 缩放级别变化时刷新标签显示

@@ -32,6 +32,10 @@ HTTP_PORT = int(os.environ.get("PORT", "8080"))
 
 READSB_BIN = "/usr/bin/readsb"
 
+# readsb raw 输出端口（--net-ro-port）：后端直连该端口逐帧统计 DF17 且 CRC 通过的报文
+READSB_RAW_HOST = "127.0.0.1"
+READSB_RAW_PORT = int(os.environ.get("ADS_RAW_PORT", "30002"))
+
 
 def ensure_dirs() -> None:
     for d in (DATA_DIR, LOG_DIR):

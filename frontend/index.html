@@ -4,9 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ADS-B 实时地图显示</title>
+<script>
+/* 主题预加载：localStorage 优先，其次跟随系统，避免首帧闪烁 */
+(function () {
+  var t = 'dark';
+  try {
+    t = localStorage.getItem('adsb-theme') ||
+        (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  } catch (e) {}
+  document.documentElement.dataset.theme = t;
+})();
+</script>
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="css/style.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2340c4ff' d='M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%234d8dff' d='M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z'/%3E%3C/svg%3E">
 </head>
 <body>
 <header id="topbar">
@@ -35,8 +46,14 @@
   </div>
   <div class="counters">
     <div class="counter" title="当前活动航空器"><span id="cnt-ac">0</span><label>航空器</label></div>
-    <div class="counter" title="累计接收报文数"><span id="cnt-msg">0</span><label>报文</label></div>
-    <div class="counter" title="UTC 时间"><span id="clock">--:--:--</span><label>UTC</label></div>
+    <div class="counter" title="累计采集的 DF17 报文数（CRC 校验通过）"><span id="cnt-msg">0</span><label>报文</label></div>
+    <div class="counter counter-click" id="clock-box" title="点击切换 UTC / 北京时间">
+      <span id="clock">--:--:--</span><label id="clock-label">UTC</label>
+    </div>
+    <button id="btn-theme" class="sysbtn sysbtn-icon" title="切换浅色 / 深色模式" aria-label="切换主题">
+      <svg class="ti-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.4" fill="currentColor"/><g stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="12" y1="1.8" x2="12" y2="4.2"/><line x1="12" y1="19.8" x2="12" y2="22.2"/><line x1="1.8" y1="12" x2="4.2" y2="12"/><line x1="19.8" y1="12" x2="22.2" y2="12"/><line x1="4.8" y1="4.8" x2="6.4" y2="6.4"/><line x1="17.6" y1="17.6" x2="19.2" y2="19.2"/><line x1="4.8" y1="19.2" x2="6.4" y2="17.6"/><line x1="17.6" y1="6.4" x2="19.2" y2="4.8"/></g></svg>
+      <svg class="ti-moon" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20.8 13.7A8.6 8.6 0 0 1 10.3 3.2a.65.65 0 0 0-.84-.78A9.8 9.8 0 1 0 21.6 14.55a.65.65 0 0 0-.8-.85z"/></svg>
+    </button>
     <button id="btn-pause" class="sysbtn" title="暂停前端映射（后台继续采集）">⏸ 暂停显示</button>
     <button id="btn-shutdown" class="sysbtn sysbtn-danger" title="终止前后端服务">⏻ 终止系统</button>
   </div>
@@ -56,7 +73,23 @@
 
     <div id="warmup-overlay" hidden>
       <div class="wu-card">
-        <div class="wu-spinner"></div>
+        <div class="wu-scene" aria-hidden="true">
+          <div class="wu-stage">
+            <div class="wu-cloud c1"></div>
+            <div class="wu-cloud c2"></div>
+            <div class="wu-cloud c3"></div>
+            <svg class="wu-route" viewBox="0 0 360 96" fill="none">
+              <path class="wu-route-dash" d="M10 78 C 110 74, 226 58, 348 18"/>
+              <path class="wu-route-pulse" d="M10 78 C 110 74, 226 58, 348 18" pathLength="400"/>
+              <circle class="wp" cx="10" cy="78" r="3"/>
+              <circle class="wp" cx="186" cy="61" r="3"/>
+              <circle class="wp wp-end" cx="348" cy="18" r="3.5"/>
+            </svg>
+            <div class="wu-plane">
+              <svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z"/></svg>
+            </div>
+          </div>
+        </div>
         <h2>系统预热中</h2>
         <ul id="wu-steps">
           <li data-phase="checking_hardware"><i></i><span>正在检查物理硬件</span><em></em></li>
@@ -69,14 +102,10 @@
       </div>
     </div>
 
-    <div id="paused-banner" hidden>
-      ⏸ 前端映射已暂停 — 后台数据收集中 <button id="pb-resume">恢复显示</button>
-    </div>
-
     <div id="infopanel" hidden>
       <button id="ip-close" title="关闭">×</button>
       <div class="ip-head">
-        <svg viewBox="-52 -52 104 104" class="ip-plane"><path id="ip-plane-path" fill="#40c4ff" d="M0,-46 C2,-46 4,-44 4.5,-40 L6,-18 L44,2 L44,10 L6,-2 L4.5,22 L16,32 L16,38 L0,34 L-16,38 L-16,32 L-4.5,22 L-6,-2 L-44,10 L-44,2 L-6,-18 L-4.5,-40 C-4,-44 -2,-46 0,-46 Z"/></svg>
+        <svg viewBox="-52 -52 104 104" class="ip-plane"><path id="ip-plane-path" fill="currentColor" d="M0,-46 C2,-46 4,-44 4.5,-40 L6,-18 L44,2 L44,10 L6,-2 L4.5,22 L16,32 L16,38 L0,34 L-16,38 L-16,32 L-4.5,22 L-6,-2 L-44,10 L-44,2 L-6,-18 L-4.5,-40 C-4,-44 -2,-46 0,-46 Z"/></svg>
         <div>
           <div id="ip-callsign" class="ip-callsign">------</div>
           <div class="ip-sub"><span id="ip-hex" class="mono">hex</span>

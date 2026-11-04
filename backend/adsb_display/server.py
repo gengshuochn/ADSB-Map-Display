@@ -31,7 +31,7 @@ class AppContext:
     """服务运行上下文：状态库 + 数据源(live/replay) + 预热/暂停控制 + 元信息。"""
 
     def __init__(self, mode: str, store: AircraftStore, source, receiver: dict, dataset_name: str | None,
-                 warmup=None, shutdown_cb=None):
+                 warmup=None, df17_counter=None, shutdown_cb=None):
         self.mode = mode  # "live" | "replay"
         self.store = store
         self.source = source  # LiveCollector | ReplaySource | None
@@ -40,6 +40,7 @@ class AppContext:
         self.started_at = time.time()
         self.state_version = 0
         self.warmup = warmup          # Warmup 实例（live 模式）
+        self.df17_counter = df17_counter  # Df17Counter 实例（live 模式）
         self.display_paused = False   # True: 后台继续采集, 前端停止映射
         self.shutdown_cb = shutdown_cb or (lambda: None)
 
@@ -60,6 +61,8 @@ class AppContext:
         }
         if self.warmup is not None:
             st["warmup"] = self.warmup.status()
+        if self.df17_counter is not None:
+            st["msgstats"] = self.df17_counter.status()
         if self.source is not None and hasattr(self.source, "status"):
             st["source"] = self.source.status()
         return st

@@ -9,6 +9,9 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 
+# ---- 本地笔记（不入库）----
+TODO.md
+
 # ---- 编辑器 / 操作系统 ----
 .vscode/
 .idea/

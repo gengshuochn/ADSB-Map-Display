@@ -21,6 +21,7 @@ from .server import AppContext, make_server
 from .collector import LiveCollector
 from .replay import ReplaySource
 from .warmup import Warmup
+from .msgstats import Df17Counter
 
 
 def setup_logging() -> None:
@@ -81,6 +82,7 @@ def cmd_serve(args) -> int:
     source = None
     dataset_name = None
     warmup: Warmup | None = None
+    df17_counter: Df17Counter | None = None
     shutdown_event = threading.Event()
 
     def _on_batch(recs, now):
@@ -111,14 +113,17 @@ def cmd_serve(args) -> int:
                 _on_batch(recs, now)
                 # 预热推进: 报文接收中 → 首个带位置航空器即就绪
                 if warmup.phase == "collecting":
-                    st = src.status()
-                    warmup.set("collecting", f"正在收集数据… 累计报文 {st['messages']}")
+                    msgs = df17_counter.messages_total if df17_counter else 0
+                    warmup.set("collecting", f"正在收集数据… 累计报文 {msgs}")
                     if recs:
                         warmup.set("ready", f"已解算 {len(recs)} 架航空器位置")
-                    elif st.get("last_error"):
-                        warmup.set_error(str(st["last_error"]))
+                    elif st_error := (src.status().get("last_error")):
+                        warmup.set_error(str(st_error))
                 # 就绪阶段无需再推进，detail 保留"已解算 N 架"作为摘要
 
+            # DF17 报文统计：直连 readsb raw 端口独立校验 CRC，仅计 DF17 且校验通过
+            df17_counter = Df17Counter(config.READSB_RAW_HOST, config.READSB_RAW_PORT)
+            df17_counter.start()
             src.on_batch = _live_batch
             src.start()
             source = src
@@ -139,7 +144,7 @@ def cmd_serve(args) -> int:
 
     ctx = AppContext(
         mode=args.mode, store=store, source=source, receiver=receiver,
-        dataset_name=dataset_name, warmup=warmup,
+        dataset_name=dataset_name, warmup=warmup, df17_counter=df17_counter,
         shutdown_cb=shutdown_event.set,
     )
     httpd = make_server(ctx, args.port)
@@ -166,6 +171,8 @@ def cmd_serve(args) -> int:
         log.info("正在停止服务…")
         httpd.shutdown()
         http_thread.join(timeout=3)
+        if df17_counter is not None:
+            df17_counter.stop()
         if source is not None:
             source.stop()
         log.info("已退出")
