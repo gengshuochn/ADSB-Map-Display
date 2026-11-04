@@ -124,11 +124,7 @@ def cmd_serve(args) -> int:
 
             # DF17 报文统计：直连 readsb raw 端口独立校验 CRC，仅计 DF17 且校验通过
             df17_counter = Df17Counter(config.READSB_RAW_HOST, config.READSB_RAW_PORT)
-            df17_counter.start()
             src.on_batch = _live_batch
-            src.start()
-            source = src
-            warmup.set("collecting", "正在收集数据… 等待报文")
     else:
         ds = pick_replay_dataset(args.dataset)
         if ds is None:
@@ -139,29 +135,39 @@ def cmd_serve(args) -> int:
         src.on_reset = lambda: store.reset()
         if src.load() == 0:
             raise SystemExit(f"数据集 {ds.name} 无法解析出回放批次。")
-        src.start()
-        source = src
         log.info("回放数据集: data/%s", ds.name)
 
-    ctx = AppContext(
-        mode=args.mode, store=store, source=source, receiver=receiver,
-        dataset_name=dataset_name, warmup=warmup, df17_counter=df17_counter,
-        shutdown_cb=shutdown_event.set,
-    )
-    httpd = make_server(ctx, args.port)
-    log.info("服务已启动: http://127.0.0.1:%d  (mode=%s dataset=%s)", args.port, args.mode, dataset_name)
-
-    def _sig(_sig, _frm):
-        shutdown_event.set()
-
-    signal.signal(signal.SIGINT, _sig)
-    signal.signal(signal.SIGTERM, _sig)
-
-    http_thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
-    http_thread.start()
-
-    deadline = time.time() + args.duration if args.duration else None
+    httpd = None
+    http_thread = None
+    source = None
     try:
+        if args.mode == "live":
+            df17_counter.start()
+            src.start()
+            source = src
+            warmup.set("collecting", "正在收集数据… 等待报文")
+        else:
+            src.start()
+            source = src
+
+        ctx = AppContext(
+            mode=args.mode, store=store, source=source, receiver=receiver,
+            dataset_name=dataset_name, warmup=warmup, df17_counter=df17_counter,
+            shutdown_cb=shutdown_event.set,
+        )
+        httpd = make_server(ctx, args.port)
+        log.info("服务已启动: http://127.0.0.1:%d  (mode=%s dataset=%s)", args.port, args.mode, dataset_name)
+
+        def _sig(_sig, _frm):
+            shutdown_event.set()
+
+        signal.signal(signal.SIGINT, _sig)
+        signal.signal(signal.SIGTERM, _sig)
+
+        http_thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
+        http_thread.start()
+
+        deadline = time.time() + args.duration if args.duration else None
         # 主循环: 响应前端终止请求 / 信号 / 定时时长
         while not shutdown_event.is_set():
             time.sleep(0.5)
@@ -170,8 +176,10 @@ def cmd_serve(args) -> int:
                 break
     finally:
         log.info("正在停止服务…")
-        httpd.shutdown()
-        http_thread.join(timeout=3)
+        if httpd is not None:
+            httpd.shutdown()
+        if http_thread is not None:
+            http_thread.join(timeout=3)
         if df17_counter is not None:
             df17_counter.stop()
         if source is not None:

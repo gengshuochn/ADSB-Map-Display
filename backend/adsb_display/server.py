@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -110,13 +111,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             elif path == "/api/state":
                 self.ctx.state_version += 1
-                self._json(self.ctx.snapshot())
+                if self.ctx.display_paused:
+                    self._json({
+                        "now": self.ctx.clock_now(),
+                        "heartbeat": True,
+                        "status": self.ctx.status(),
+                        "aircraft": [],
+                    })
+                else:
+                    self._json(self.ctx.snapshot())
             elif path == "/api/stream":
                 self._handle_stream()
             elif path == "/api/track":
                 qs = parse_qs(parsed.query)
                 hx = (qs.get("hex") or [""])[0].strip().lower()
-                limit = int((qs.get("limit") or ["0"])[0] or 0)
+                limit_raw = (qs.get("limit") or ["0"])[0] or "0"
+                try:
+                    limit = int(limit_raw)
+                    if limit < 0 or limit > 100000:
+                        self._json({"error": "invalid limit"}, 400)
+                        return
+                except ValueError:
+                    self._json({"error": "bad limit"}, 400)
+                    return
                 if not hx:
                     self._json({"error": "missing hex"}, 400)
                     return
@@ -181,7 +198,11 @@ class Handler(BaseHTTPRequestHandler):
             elif action == "speed":
                 qs = parse_qs(parsed.query)
                 try:
-                    src.set_speed(float((qs.get("value") or ["1"])[0]))
+                    val = float((qs.get("value") or ["1"])[0])
+                    if not math.isfinite(val) or val <= 0:
+                        self._json({"error": "bad speed"}, 400)
+                        return
+                    src.set_speed(val)
                 except ValueError:
                     self._json({"error": "bad speed"}, 400)
                     return

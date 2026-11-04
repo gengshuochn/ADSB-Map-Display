@@ -66,12 +66,18 @@ class AircraftStore:
                 else:
                     norm["first_seen"] = now
                 self.aircraft[hx] = norm
-                self.last_seen[hx] = now
+
+                # 扣除 seen 延迟后的真实报文时间，作为最后出现时间
+                msg_time = norm.get("last_update", now)
+                self.last_seen[hx] = msg_time
+
+                # 轨迹维护：仅当有经纬度且位置更新时间有效时追加（防重复时间戳与静态冗余）
                 if norm.get("lat") is not None and norm.get("lon") is not None:
+                    pos_time = norm.get("last_pos_update", now)
                     trk = self.tracks.setdefault(hx, deque(maxlen=config.TRACK_MAX_POINTS))
                     pts = trk
-                    if not pts or now - pts[-1][0] >= 0.4:  # 防重复时间戳
-                        pts.append((now, norm["lat"], norm["lon"], norm.get("alt_ft"), norm.get("gs"), norm.get("track")))
+                    if not pts or (pos_time - pts[-1][0] >= 0.4 and (norm["lat"] != pts[-1][1] or norm["lon"] != pts[-1][2] or pos_time > pts[-1][0])):
+                        pts.append((round(pos_time, 2), norm["lat"], norm["lon"], norm.get("alt_ft"), norm.get("gs"), norm.get("track")))
                 n += 1
             self.update_count += 1
         return n
@@ -94,9 +100,19 @@ class AircraftStore:
                 out[k] = v
         out["lat"] = lat
         out["lon"] = lon
-        out["last_update"] = now
+
+        # 区分采集轮询时间、报文接收时间（扣除 seen）与位置更新时间（扣除 seen_pos）
+        seen = rec.get("seen")
+        seen_s = float(seen) if isinstance(seen, (int, float)) and seen >= 0 else 0.0
+        msg_time = max(0.0, now - seen_s)
+
+        seen_pos = rec.get("seen_pos")
+        seen_pos_s = float(seen_pos) if isinstance(seen_pos, (int, float)) and seen_pos >= 0 else seen_s
+        pos_time = max(0.0, now - seen_pos_s)
+
+        out["last_update"] = round(msg_time, 2)
         if lat is not None and lon is not None:
-            out["last_pos_update"] = now
+            out["last_pos_update"] = round(pos_time, 2)
             d, b = _dist_bearing_km(self.receiver_lat, self.receiver_lon, lat, lon)
             out["dist_km"] = round(d, 2)
             out["bearing"] = round(b, 1)
@@ -141,17 +157,21 @@ class AircraftStore:
     def prune(self, now: float | None = None) -> None:
         now = now if now is not None else self._now()
         with self._lock:
-            # 1. 超过 TRACK_KEEP_S（30 分钟）清理轨迹与最后出现时间记录
+            # 1. 超过 AIRCRAFT_DROP_S（75 秒）从活动航空器列表移除
+            drop_a = [h for h, t in self.last_seen.items() if now - t > config.AIRCRAFT_DROP_S]
+            for h in drop_a:
+                self.aircraft.pop(h, None)
+
+            # 2. 超过 TRACK_KEEP_S（30 分钟）清理轨迹与最后出现时间记录
             drop_t = [h for h, t in self.last_seen.items() if now - t > config.TRACK_KEEP_S]
             for h in drop_t:
                 self.tracks.pop(h, None)
                 self.last_seen.pop(h, None)
-            # 2. 超过 AIRCRAFT_DROP_S（75 秒）从活动航空器列表移除
-            drop_a = [h for h, t in self.last_seen.items() if now - t > config.AIRCRAFT_DROP_S]
-            for h in drop_a:
-                self.aircraft.pop(h, None)
-                if h not in self.tracks:
-                    self.last_seen.pop(h, None)
+
+            # 3. 防御性清理：移除没有时间记录的孤儿飞机
+            for h in list(self.aircraft.keys()):
+                if h not in self.last_seen:
+                    self.aircraft.pop(h, None)
 
     def _now(self) -> float:
         import time

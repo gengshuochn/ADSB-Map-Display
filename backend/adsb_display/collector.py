@@ -146,12 +146,15 @@ class LiveCollector:
         aircraft = data.get("aircraft") or []
         self.messages_total = max(self.messages_total, int(data.get("messages") or 0))
         self.last_poll_ts = now
-        # 落盘：与参考采集脚本一致，仅记录带位置的航空器（一行一机，每秒一批）
+        # 落盘：每秒保存带时间戳的批次记录（含空批次以保证回放时间线真实完整）
         with_pos = [a for a in aircraft if a.get("lat") is not None and a.get("lon") is not None]
-        if with_pos:
-            line = "\n".join(json.dumps(a, separators=(",", ":")) for a in with_pos) + "\n"
-            with open(self.tracks_file, "a", encoding="utf-8") as f:
-                f.write(line)
+        record = {
+            "now": round(now, 3),
+            "aircraft": with_pos,
+        }
+        line = json.dumps(record, separators=(",", ":")) + "\n"
+        with open(self.tracks_file, "a", encoding="utf-8") as f:
+            f.write(line)
         return with_pos
 
     # ------------------------------------------------------------------

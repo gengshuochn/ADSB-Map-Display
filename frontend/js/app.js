@@ -15,6 +15,7 @@
     trails: new Map(),        // hex -> {poly, pts: []}
     selTrack: null,           // 选中的 L.Polyline
     selTrackCount: -1,
+    selTrackLastTs: 0,
     rows: new Map(),          // hex -> DOM row
     viewInit: false,
     search: '',
@@ -190,6 +191,7 @@
     }
     S.selected = hex;
     S.selTrackCount = -1;
+    S.selTrackLastTs = 0;
     $('infopanel').hidden = false;
     updateSelectionVisual();
     refreshSelectedTrack(true);
@@ -202,6 +204,8 @@
   function deselect() {
     S.selected = null;
     S.follow = false;
+    S.selTrackCount = -1;
+    S.selTrackLastTs = 0;
     $('ip-follow').classList.remove('active');
     $('ip-follow').textContent = '⊘ 跟随追踪';
     $('infopanel').hidden = true;
@@ -218,17 +222,25 @@
 
   function refreshSelectedTrack(force) {
     if (!S.selected) return;
-    fetch('/api/track?hex=' + encodeURIComponent(S.selected))
+    const reqHex = S.selected;
+    fetch('/api/track?hex=' + encodeURIComponent(reqHex))
       .then((r) => r.json())
       .then((trk) => {
-        if (!trk || trk.count === 0) {
+        // 防乱序竞争：响应 hex 必须与当前选中的航空器严格一致
+        if (!trk || S.selected !== trk.hex || S.selected !== reqHex) return;
+        if (trk.count === 0 || !trk.points || trk.points.length === 0) {
           $('ip-trackpts').textContent = '0';
           if (S.selTrack) { map.removeLayer(S.selTrack); S.selTrack = null; }
+          S.selTrackCount = 0;
+          S.selTrackLastTs = 0;
           return;
         }
-        if (S.selected !== trk.hex) return;
-        if (!force && trk.count === S.selTrackCount) return;
+        const lastPt = trk.points[trk.points.length - 1];
+        const lastTs = lastPt ? lastPt[0] : 0;
+        // 比较点数与最新点时间戳（解决 5400 点满容量后点数不变导致轨迹冻结的问题）
+        if (!force && trk.count === S.selTrackCount && lastTs === S.selTrackLastTs) return;
         S.selTrackCount = trk.count;
+        S.selTrackLastTs = lastTs;
         const latlngs = trk.points
           .filter((p) => p[1] != null && p[2] != null)
           .map((p) => GCJ.wgs2gcj(p[1], p[2]));
@@ -340,18 +352,12 @@
   // ------------------------------------------------------------------
   function handleState(st) {
     S.lastUpdate = Date.now();
-    // 暂停心跳：只同步暂停指示，不覆盖数据
-    if (st.heartbeat && st.status && st.status.display_paused) {
-      setConn(true);
-      if (S.status) S.status.display_paused = true; // 供按钮点击判定当前暂停态
-      updatePausedBanner(true);
-      $('st-upd').textContent = '映射已暂停（后台采集中）';
-      return;
-    }
+    if (!st || !st.status) return;
+
     const prevMode = S.mode;
     S.status = st.status;
     S.mode = st.status.mode;
-    if (!S.receiver) {
+    if (!S.receiver && st.status.receiver) {
       initReceiverView(st.status.receiver.lat, st.status.receiver.lon, st.status.receiver.max_range_km);
     }
 
@@ -368,6 +374,15 @@
     // 暂停指示（仅按钮图标切换，无横幅）
     if (S.mode === 'live') updateWarmup(st.status.warmup);
     updatePausedBanner(st.status.display_paused === true);
+
+    // 暂停心跳或 display_paused：保持控制与连接状态，不覆盖航空器数据
+    if (st.heartbeat || st.status.display_paused) {
+      setConn(true);
+      if (st.status.display_paused) {
+        $('st-upd').textContent = '映射已暂停（后台采集中）';
+        return;
+      }
+    }
 
     // 活动集
     const alive = new Set();
@@ -685,6 +700,11 @@
 
   fetch('/api/meta').then((r) => r.json()).then((meta) => {
     if (meta.receiver) initReceiverView(meta.receiver.lat, meta.receiver.lon, meta.receiver.max_range_km);
+    if (!S.status) {
+      S.status = meta;
+      S.mode = meta.mode;
+      updatePausedBanner(meta.display_paused === true);
+    }
   }).catch(() => {});
 
   connectSSE();

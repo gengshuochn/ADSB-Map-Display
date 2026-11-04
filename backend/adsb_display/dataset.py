@@ -117,9 +117,50 @@ _TRACKS_RE = re.compile(r"^tracks-.*\.jsonl$")
 _HIST_NUM_RE = re.compile(r"history_(\d+)\.json$")
 
 
-def _history_sort_key(p: Path) -> int:
+def _history_file_now(p: Path) -> float:
+    """读取 history 快照内的绝对时间戳（支持 readsb 环形缓冲区跨界排序）。"""
+    try:
+        doc = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+        if isinstance(doc, dict) and "now" in doc:
+            return float(doc["now"])
+    except Exception:
+        pass
     m = _HIST_NUM_RE.search(p.name)
-    return int(m.group(1)) if m else 0
+    return float(m.group(1)) if m else 0.0
+
+
+def _has_track_records(p: Path) -> bool:
+    """检查 tracks 文件中是否包含可解析的有效航空器记录。"""
+    try:
+        if p.stat().st_size == 0:
+            return False
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if '"hex"' in line:
+                    return True
+                if '"aircraft"' in line and '"aircraft":[]' not in line:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _has_history_records(p: Path) -> bool:
+    """检查 history 文件中是否包含有效航空器记录。"""
+    try:
+        if p.stat().st_size == 0:
+            return False
+        doc = json.loads(p.read_text(encoding="utf-8", errors="ignore"))
+        if isinstance(doc, dict):
+            ac = doc.get("aircraft")
+            if isinstance(ac, list) and len(ac) > 0:
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def scan_replay_datasets(data_root: Path | None = None) -> list[ReplayDataset]:
@@ -131,17 +172,18 @@ def scan_replay_datasets(data_root: Path | None = None) -> list[ReplayDataset]:
     for d in sorted(data_root.iterdir()):
         if not d.is_dir():
             continue
-        tracks_files = sorted((d / "logs").glob("tracks-*.jsonl")) if (d / "logs").is_dir() else []
-        history_files = sorted((d / "live").glob("history_*.json"), key=_history_sort_key) if (d / "live").is_dir() else []
-        if tracks_files:
-            files = tracks_files
+        tracks_candidates = sorted((d / "logs").glob("tracks-*.jsonl")) if (d / "logs").is_dir() else []
+        history_candidates = sorted((d / "live").glob("history_*.json"), key=_history_file_now) if (d / "live").is_dir() else []
+
+        valid_tracks = [f for f in tracks_candidates if _has_track_records(f)]
+        has_history = any(_has_history_records(f) for f in history_candidates)
+
+        if valid_tracks:
+            files = valid_tracks
             kind = "tracks"
-        elif history_files:
-            # 仅当 history 文件中确实包含有效航空器记录时才作为可回放候选
-            has_records = any('"hex"' in f.read_text(encoding="utf-8", errors="ignore") for f in history_files)
-            if not has_records:
-                continue
-            files = history_files
+        elif has_history:
+            # history 文件按快照 now 排序，滤除 0 字节空文件
+            files = [f for f in history_candidates if f.stat().st_size > 0]
             kind = "history"
         else:
             continue
