@@ -448,3 +448,24 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 #statusbar #st-src, #statusbar .dim { flex-shrink: 1; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 #statusbar .dim { opacity: 1; }
 @media (max-width: 900px) { :root { --sidebar-width: 240px; } }
+
+/* 顶栏不足一行时先折叠搜索；100% 仍不足时采用两行分组布局。 */
+[hidden] { display: none !important; }
+#topbar { height: auto; min-height: 52px; padding-top: 8px; padding-bottom: 8px; }
+#topbar > .brand, #topbar > .replay-ctrl, #topbar > .counters { flex-shrink: 0; }
+.searchbox { min-width: 180px; }
+#search { min-width: 0; }
+#search-toggle { flex-shrink: 0; }
+#topbar.two-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px; }
+#topbar.two-row .brand { grid-row: 1; grid-column: 1; }
+#topbar.two-row .searchbox, #topbar.two-row #search-toggle { grid-row: 1; grid-column: 2; }
+#topbar.two-row .searchbox { width: 230px; }
+#topbar.two-row #replay-ctrl { grid-row: 2; grid-column: 1; justify-self: start; }
+#topbar.two-row .counters { grid-row: 2; grid-column: 2; }
+#topbar.two-row #replay-ctrl[hidden] + .counters { grid-column: 1 / -1; }
+#search-popover { position: fixed; z-index: 1800; width: min(420px, calc(100vw - 16px)); padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--card-shadow); }
+#search-popover .searchbox { width: 100%; min-width: 0; }
+#statusbar { overflow: hidden; }
+@media (prefers-reduced-motion: reduce) {
+  #sidebar-frame, #sidebar, #pause-banner { transition: none; }
+}

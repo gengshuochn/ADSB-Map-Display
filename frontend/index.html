@@ -33,6 +33,7 @@
     <input id="search" type="text" placeholder="搜索 ICAO 地址 / 航班号，回车定位" autocomplete="off" spellcheck="false">
     <button id="search-clear" title="清空" hidden>×</button>
   </div>
+  <button id="search-toggle" class="sysbtn sysbtn-icon" title="展开搜索" aria-label="展开搜索" aria-expanded="false" aria-controls="search-popover" hidden>⌕</button>
   <div id="replay-ctrl" class="replay-ctrl" hidden>
     <button id="rp-toggle" title="播放/暂停">⏸</button>
     <input id="rp-seek" type="range" min="0" max="100" value="0" step="1">
@@ -60,6 +61,7 @@
   </div>
 </header>
 
+<div id="search-popover" hidden></div>
 <div id="pause-banner" role="status" aria-hidden="true">
   <span>前端显示已中断，后端数据收集进行中</span>
   <div><button id="banner-resume" class="btn">继续显示</button><button id="banner-mode" class="btn">切换模式</button></div>

@@ -54,6 +54,7 @@ class AppContext:
         self.display_paused = False
         self.shutdown_cb = shutdown_cb or (lambda: None)
         self._closed = False
+        self.replay_loop = source.loop if isinstance(source, ReplaySource) else True
         if isinstance(self.replay_source, ReplaySource):
             self._bind_replay(self.replay_source)
 
@@ -80,7 +81,14 @@ class AppContext:
             self.replay_receiver = dict(self.live_receiver)
             metadata = ds.meta.get("receiver")
             if isinstance(metadata, dict):
-                self.replay_receiver.update({k: v for k, v in metadata.items() if v is not None})
+                for key in ("lat", "lon", "gain", "max_range_km"):
+                    value = metadata.get(key)
+                    if isinstance(value, (int, float)) and math.isfinite(value):
+                        if (key == "lat" and abs(value) > 90) or (key == "lon" and abs(value) > 180):
+                            continue
+                        self.replay_receiver[key] = value
+                if isinstance(metadata.get("source"), str):
+                    self.replay_receiver["source"] = metadata["source"]
             self.store_replay = AircraftStore(self.replay_receiver.get("lat", 0), self.replay_receiver.get("lon", 0))
             self.dataset_name = ds.name
 
@@ -153,8 +161,11 @@ class AppContext:
             available = {d.name: d for d in scan_replay_datasets()}
             if len(set(names)) != len(names) or any(n not in available or n == self.collecting_dataset for n in names):
                 raise ValueError("数据集无效或正在采集中")
-            candidate = ReplaySource([available[n] for n in names])
-            candidate.load()  # 加载失败时，原回放和显示状态不变。
+            candidate = ReplaySource([available[n] for n in names], loop=self.replay_loop)
+            try:
+                candidate.load()  # 加载失败时，原回放和显示状态不变。
+            except (ValueError, TypeError, AttributeError, KeyError) as exc:
+                raise ValueError(f"无法读取回放数据：{exc}") from exc
             old = self.replay_source
             if old is not None:
                 old.stop()  # join 不能持有回放共享锁。

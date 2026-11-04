@@ -117,7 +117,7 @@ class DisplayTests(unittest.TestCase):
 
     def test_replay_only_cannot_start_hardware(self):
         ds = next(d for d in scan_replay_datasets() if d.name == 'first')
-        src = ReplaySource(ds)
+        src = ReplaySource(ds, loop=False)
         src.load()
         ctx = AppContext('replay', AircraftStore(31, 118), src, self.receiver, ds.name)
         try:
@@ -125,8 +125,64 @@ class DisplayTests(unittest.TestCase):
                 ctx.switch_live()
             ctx.switch_replay(['second'])
             self.assertFalse(ctx.status()['live_available'])
+            self.assertFalse(ctx.replay_source.loop)
         finally:
             ctx.close()
+
+    def test_legacy_without_timestamps_and_metadata_fallback(self):
+        file = self.root / 'first/logs/tracks-001.jsonl'
+        file.write_text('\n'.join(json.dumps({'hex': 'a1', 'lat': 31+i*.01, 'lon': 118}) for i in range(3)))
+        self.ctx.switch_replay(['first'])
+        src = self.ctx.replay_source
+        src.pause()
+        self.assertEqual(src.batch_times[2] - src.batch_times[0], 2)
+        self.assertEqual(self.ctx.receiver['gain'], 40)
+
+    def test_empty_tracks_history_compatibility(self):
+        file = self.root / 'first/logs/tracks-001.jsonl'
+        file.write_text('')
+        history = self.root / 'first/live'
+        history.mkdir()
+        (history / 'history_99.json').write_text(json.dumps({'now': 2000, 'aircraft': [{'hex': 'a1', 'lat': 31, 'lon': 118}]}))
+        (history / 'history_0.json').write_text(json.dumps({'now': 1000, 'aircraft': [{'hex': 'a1', 'lat': 31, 'lon': 118}]}))
+        self.ctx.switch_replay(['first'])
+        self.ctx.replay_source.pause()
+        self.assertEqual(self.ctx.replay_source.batch_times, [1000, 2000])
+
+    def test_corrupt_records_do_not_replace_display(self):
+        self.ctx.switch_replay(['first'])
+        old = self.ctx.replay_source
+        (self.root / 'second/logs/tracks-001.jsonl').write_text(json.dumps({'now': 100, 'aircraft': [{'hex': 'b2', 'lat': 'broken'}]}))
+        with self.assertRaises(ValueError):
+            self.ctx.switch_replay(['second'])
+        self.assertIs(old, self.ctx.replay_source)
+
+    def test_snapshot_does_not_observe_partial_seek(self):
+        self.ctx.switch_replay(['first'])
+        src = self.ctx.replay_source
+        src.pause()
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        original = src.on_batch
+        def hold(records, now):
+            entered.set()
+            release.wait(2)
+            original(records, now)
+        src.on_batch = hold
+        seeker = threading.Thread(target=src.seek, args=(2,))
+        seeker.start()
+        self.assertTrue(entered.wait(1))
+        snapshots = []
+        def read():
+            snapshots.append(self.ctx.snapshot())
+            finished.set()
+        reader = threading.Thread(target=read)
+        reader.start()
+        self.assertFalse(finished.wait(.05))
+        release.set()
+        seeker.join(2)
+        reader.join(2)
+        self.assertEqual(snapshots[0]['status']['source']['batch_index'], 2)
+        self.assertEqual(snapshots[0]['aircraft'][0]['lat'], 31.002)
 
     def test_http_switch_and_error_contract(self):
         from urllib.request import Request, urlopen
@@ -148,8 +204,10 @@ class DisplayTests(unittest.TestCase):
             with self.assertRaises(HTTPError) as err:
                 post('/api/replay/resume')
             self.assertEqual(err.exception.code, 400)
-            with self.assertRaises(HTTPError):
+            err.exception.close()
+            with self.assertRaises(HTTPError) as rejected:
                 post('/api/display/replay', {'datasets': ['collecting']})
+            rejected.exception.close()
         finally:
             server.shutdown()
             server.server_close()

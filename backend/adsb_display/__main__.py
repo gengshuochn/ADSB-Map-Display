@@ -183,6 +183,8 @@ def cmd_serve(args) -> int:
             httpd.shutdown()
         if http_thread is not None:
             http_thread.join(timeout=3)
+        if httpd is not None:
+            httpd.server_close()
         if ctx is not None:
             ctx.close()
         if df17_counter is not None:

@@ -66,6 +66,13 @@ class ReplaySource:
                     pass
             last = None
             for ts, records in rows:
+                for record in records:
+                    if not isinstance(record.get("hex"), str):
+                        raise ValueError(f"数据集 {ds.name} 航空器地址无效")
+                    for key, limit in (("lat", 90), ("lon", 180)):
+                        value = record.get(key)
+                        if value is not None and (not isinstance(value, (int, float)) or not math.isfinite(value) or abs(value) > limit):
+                            raise ValueError(f"数据集 {ds.name} 航空器坐标无效")
                 valid = isinstance(ts, (float, int)) and math.isfinite(ts)
                 now = float(ts) if valid else (last + 1 if last is not None else anchor)
                 if last is not None and now < last:

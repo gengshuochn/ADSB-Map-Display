@@ -619,6 +619,7 @@
   function showModal(id) {
     const el = $(id);
     if (!el.hidden) return;
+    closeSearch();
     modalFocus.set(id, document.activeElement);
     el.hidden = false;
     (el.querySelector('button:not([hidden]):not(:disabled)') || el.firstElementChild).focus();
@@ -778,6 +779,132 @@
   $('search-clear').addEventListener('click', () => {
     searchInput.value = ''; S.search = ''; $('search-clear').hidden = true; updateList();
   });
+
+  // UI 缩放仅作用于外壳；Leaflet 坐标系始终保持未缩放。
+  const zoomLevels = [1, 1.25, 1.5, 1.75, 2];
+  let uiZoom = 1;
+  let zoomCeiling = 2;
+  let uiFrame = 0;
+  const topbar = $('topbar');
+  const searchbox = document.querySelector('.searchbox');
+  const searchAnchor = document.createComment('搜索框原位置');
+  searchbox.before(searchAnchor);
+  function closeSearch() {
+    if ($('search-popover').hidden) return;
+    $('search-popover').hidden = true;
+    $('search-toggle').setAttribute('aria-expanded', 'false');
+    if (searchbox.contains(document.activeElement)) $('search-toggle').focus();
+  }
+  function setCompact(compact) {
+    topbar.classList.toggle('compact', compact);
+    $('search-toggle').hidden = !compact;
+    if (compact && searchbox.parentElement === topbar) {
+      const focused = searchbox.contains(document.activeElement);
+      $('search-popover').appendChild(searchbox);
+      if (focused) openSearch();
+    } else if (!compact && searchbox.parentElement !== topbar) {
+      const focused = searchbox.contains(document.activeElement);
+      searchAnchor.after(searchbox);
+      closeSearch();
+      if (focused) searchInput.focus();
+    }
+  }
+  function positionSearch() {
+    const rect = $('search-toggle').getBoundingClientRect();
+    const popover = $('search-popover');
+    popover.style.top = topbar.getBoundingClientRect().bottom + 6 + 'px';
+    popover.style.left = Math.max(8, Math.min(rect.left, innerWidth - Math.min(420, innerWidth - 16) - 8)) + 'px';
+  }
+  function openSearch() {
+    $('search-popover').hidden = false;
+    $('search-toggle').setAttribute('aria-expanded', 'true');
+    positionSearch(); searchInput.focus();
+  }
+  $('search-toggle').addEventListener('click', () => {
+    if ($('search-popover').hidden) openSearch(); else closeSearch();
+  });
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' || e.key === 'Enter') closeSearch();
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!$('search-popover').contains(e.target) && !$('search-toggle').contains(e.target)) closeSearch();
+  });
+  function applyZoom(value) {
+    document.documentElement.style.setProperty('--ui-zoom', value);
+    [topbar, $('sidebar'), $('statusbar')].forEach((el) => { el.style.zoom = value; });
+  }
+  function overflowing() {
+    if (topbar.scrollWidth > topbar.clientWidth + 1) return true;
+    const groups = Array.from(topbar.children).filter((el) => el.getClientRects().length);
+    if (groups.some((el) => el.scrollWidth > el.clientWidth + 1)) return true;
+    const boxes = groups.map((el) => el.getBoundingClientRect());
+    return boxes.some((a, i) => boxes.slice(i + 1).some((b) =>
+      Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 &&
+      Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1));
+  }
+  function fitZoom(value, twoRows) {
+    topbar.style.zoom = value;
+    topbar.classList.toggle('two-row', twoRows);
+    setCompact(false);
+    if (overflowing()) setCompact(true);
+    return !overflowing();
+  }
+  function layoutUI() {
+    uiFrame = 0;
+    const before = $('map').getBoundingClientRect();
+    const searchWasOpen = !$('search-popover').hidden;
+    // 每次从 100% 测量基础布局，窗口扩大或 LIVE/REPLAY 变化后上限可恢复。
+    const twoRows = !fitZoom(1, false);
+    zoomCeiling = 1;
+    for (const level of zoomLevels) {
+      if (!fitZoom(level, twoRows)) break;
+      zoomCeiling = level;
+    }
+    uiZoom = Math.min(uiZoom, zoomCeiling);
+    fitZoom(uiZoom, twoRows);
+    applyZoom(uiZoom);
+    if (searchWasOpen && topbar.classList.contains('compact')) openSearch();
+    if (!$('search-popover').hidden) positionSearch();
+    try { localStorage.setItem('adsb-ui-zoom', String(uiZoom)); } catch (e) {}
+    const after = $('map').getBoundingClientRect();
+    if (before.width !== after.width || before.height !== after.height) map.invalidateSize({ pan: false });
+  }
+  function scheduleUILayout() {
+    if (!uiFrame) uiFrame = requestAnimationFrame(layoutUI);
+  }
+  function changeUIZoom(direction) {
+    const index = zoomLevels.indexOf(uiZoom);
+    const candidate = direction === 0 ? 1 : zoomLevels[Math.max(0, Math.min(zoomLevels.length - 1, index + direction))];
+    uiZoom = Math.min(candidate, zoomCeiling);
+    scheduleUILayout();
+  }
+  document.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.deltaY) changeUIZoom(e.deltaY < 0 ? 1 : -1);
+  }, { passive: false, capture: true });
+  document.addEventListener('keydown', (e) => {
+    if (!e.ctrlKey) return;
+    if (['=', '+', '-', '0'].includes(e.key)) {
+      e.preventDefault();
+      changeUIZoom(e.key === '0' ? 0 : e.key === '-' ? -1 : 1);
+    }
+  });
+  try {
+    const saved = Number(localStorage.getItem('adsb-ui-zoom'));
+    if (zoomLevels.includes(saved)) uiZoom = saved;
+  } catch (e) {}
+  new ResizeObserver(scheduleUILayout).observe(topbar);
+  let mapResizeFrame = 0;
+  new ResizeObserver(() => {
+    if (!mapResizeFrame) mapResizeFrame = requestAnimationFrame(() => {
+      mapResizeFrame = 0;
+      map.invalidateSize({ pan: false });
+    });
+  }).observe($('map-wrap'));
+  window.addEventListener('resize', scheduleUILayout);
+  scheduleUILayout();
 
   // ------------------------------------------------------------------
   // 信息面板按钮
