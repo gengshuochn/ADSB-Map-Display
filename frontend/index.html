@@ -25,6 +25,7 @@
     <svg viewBox="0 0 24 24" class="brand-icon"><path fill="currentColor" d="M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z"/></svg>
     <span class="brand-name">ADS-B <b>Display</b></span>
     <span id="mode-badge" class="badge badge-live" title="数据模式">LIVE</span>
+    <button id="btn-mode" class="sysbtn" disabled>切换模式</button>
     <span id="dataset-badge" class="badge badge-ds" title="数据集"></span>
   </div>
   <div class="searchbox">
@@ -59,6 +60,10 @@
   </div>
 </header>
 
+<div id="pause-banner" role="status" aria-hidden="true">
+  <span>前端显示已中断，后端数据收集进行中</span>
+  <div><button id="banner-resume" class="btn">继续显示</button><button id="banner-mode" class="btn">切换模式</button></div>
+</div>
 <main id="layout">
   <aside id="sidebar">
     <div id="list-head">
@@ -70,37 +75,6 @@
 
   <section id="map-wrap">
     <div id="map"></div>
-
-    <div id="warmup-overlay" hidden>
-      <div class="wu-card">
-        <div class="wu-scene" aria-hidden="true">
-          <div class="wu-stage">
-            <div class="wu-cloud c1"></div>
-            <div class="wu-cloud c2"></div>
-            <div class="wu-cloud c3"></div>
-            <svg class="wu-route" viewBox="0 0 360 96" fill="none">
-              <path class="wu-route-dash" d="M10 78 C 110 74, 226 58, 348 18"/>
-              <path class="wu-route-pulse" d="M10 78 C 110 74, 226 58, 348 18" pathLength="400"/>
-              <circle class="wp" cx="10" cy="78" r="3"/>
-              <circle class="wp" cx="186" cy="61" r="3"/>
-              <circle class="wp wp-end" cx="348" cy="18" r="3.5"/>
-            </svg>
-            <div class="wu-plane">
-              <svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z"/></svg>
-            </div>
-          </div>
-        </div>
-        <h2>系统预热中</h2>
-        <ul id="wu-steps">
-          <li data-phase="checking_hardware"><i></i><span>正在检查物理硬件</span><em></em></li>
-          <li data-phase="initializing"><i></i><span>正在初始化启动脚本</span><em></em></li>
-          <li data-phase="collecting"><i></i><span>正在收集数据</span><em></em></li>
-          <li data-phase="ready"><i></i><span>进入实时显示</span><em></em></li>
-        </ul>
-        <p id="wu-detail">等待服务连接…</p>
-        <button id="wu-skip" class="btn" hidden>跳过，直接进入显示 →</button>
-      </div>
-    </div>
 
     <div id="infopanel" hidden>
       <button id="ip-close" title="关闭">×</button>
@@ -137,23 +111,6 @@
       </div>
     </div>
 
-    <div id="shutdown-modal" hidden>
-      <div class="sd-card">
-        <h3>终止系统？</h3>
-        <p>将停止前端服务、后端与 RTL-SDR 采集。<br>本次已采集的数据已自动保存到 data/。</p>
-        <div class="sd-actions">
-          <button id="sd-cancel" class="btn">取消</button>
-          <button id="sd-confirm" class="btn sd-danger">确认终止</button>
-        </div>
-      </div>
-    </div>
-    <div id="shutdown-done" hidden>
-      <div class="sd-card">
-        <h3>✔ 系统已终止</h3>
-        <p>服务与采集均已停止，本次数据已保存。<br>本页面已断开连接，可以关闭此标签页。</p>
-      </div>
-    </div>
-
     <div id="map-legend">
       <span class="lg"><i style="background:#eceff1"></i>地面</span>
       <span class="lg"><i style="background:#00e676"></i>≤10k</span>
@@ -164,6 +121,69 @@
     </div>
   </section>
 </main>
+
+    <div id="warmup-overlay" hidden role="dialog" aria-modal="true" aria-label="系统预热中">
+      <div class="wu-card" tabindex="-1">
+        <div class="wu-scene" aria-hidden="true">
+          <div class="wu-stage">
+            <div class="wu-cloud c1"></div>
+            <div class="wu-cloud c2"></div>
+            <div class="wu-cloud c3"></div>
+            <svg class="wu-route" viewBox="0 0 360 96" fill="none">
+              <path class="wu-route-dash" d="M10 78 C 110 74, 226 58, 348 18"/>
+              <path class="wu-route-pulse" d="M10 78 C 110 74, 226 58, 348 18" pathLength="400"/>
+              <circle class="wp" cx="10" cy="78" r="3"/>
+              <circle class="wp" cx="186" cy="61" r="3"/>
+              <circle class="wp wp-end" cx="348" cy="18" r="3.5"/>
+            </svg>
+            <div class="wu-plane">
+              <svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z"/></svg>
+            </div>
+          </div>
+        </div>
+        <h2>系统预热中</h2>
+        <ul id="wu-steps">
+          <li data-phase="checking_hardware"><i></i><span>正在检查物理硬件</span><em></em></li>
+          <li data-phase="initializing"><i></i><span>正在初始化启动脚本</span><em></em></li>
+          <li data-phase="collecting"><i></i><span>正在收集数据</span><em></em></li>
+          <li data-phase="ready"><i></i><span>进入实时显示</span><em></em></li>
+        </ul>
+        <p id="wu-detail">等待服务连接…</p>
+        <button id="wu-skip" class="btn" hidden>跳过，直接进入显示 →</button>
+      </div>
+    </div>
+
+    <div id="shutdown-modal" hidden role="dialog" aria-modal="true" aria-label="终止系统">
+      <div class="sd-card" tabindex="-1">
+        <h3>终止系统？</h3>
+        <p>将停止前端服务、后端与 RTL-SDR 采集。<br>本次已采集的数据已自动保存到 data/。</p>
+        <div class="sd-actions">
+          <button id="sd-cancel" class="btn">取消</button>
+          <button id="sd-mode" class="btn">切换模式</button>
+          <button id="sd-confirm" class="btn sd-danger">确认终止</button>
+        </div>
+      </div>
+    </div>
+    <div id="shutdown-done" hidden role="dialog" aria-modal="true" aria-label="系统已终止">
+      <div class="sd-card" tabindex="-1">
+        <h3>✔ 系统已终止</h3>
+        <p>服务与采集均已停止，本次数据已保存。<br>本页面已断开连接，可以关闭此标签页。</p>
+      </div>
+    </div>
+
+<div id="dataset-modal" hidden role="dialog" aria-modal="true" aria-labelledby="dataset-title">
+  <div class="sd-card dataset-card" tabindex="-1">
+    <h3 id="dataset-title">选择回放数据集</h3>
+    <p>按创建时间顺序回放；后台实时采集不受影响。</p>
+    <div id="dataset-list"></div>
+    <p id="dataset-error" role="status"></p>
+    <div class="sd-actions">
+      <button id="ds-cancel" class="btn">取消</button>
+      <button id="ds-live" class="btn" hidden>返回实时</button>
+      <button id="ds-play" class="btn" disabled>回放</button>
+    </div>
+  </div>
+</div>
 
 <footer id="statusbar">
   <span id="sse-dot" class="dot dot-off"></span><span id="sse-text">连接中…</span>

@@ -391,3 +391,29 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   #sidebar { width: 240px; }
   .counters { gap: 10px; }
 }
+
+/* 根级弹窗不受地图或 UI 缩放影响。 */
+#warmup-overlay, #dataset-modal {
+  position: fixed; inset: 0; z-index: 2000; display: flex;
+  align-items: center; justify-content: center; padding: 20px;
+  background: var(--overlay);
+}
+#dataset-modal[hidden] { display: none; }
+.wu-card, .sd-card { max-height: calc(100dvh - 40px); overflow-y: auto; }
+.dataset-card { width: 560px; text-align: left; }
+#dataset-list { max-height: 45dvh; overflow-y: auto; margin-bottom: 16px; }
+.dataset-row { display: flex; gap: 12px; align-items: center; padding: 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.dataset-row:hover { background: var(--surface-2); }
+.dataset-row span { overflow-wrap: anywhere; }
+.dataset-row small { display: block; color: var(--muted); margin-top: 4px; }
+#dataset-error { color: var(--warn); }
+#pause-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--accent-soft); color: var(--fg); border-bottom: 0 solid var(--line);
+  max-height: 0; padding: 0 16px; opacity: 0; transform: translateY(-8px);
+  overflow: hidden; pointer-events: none; visibility: hidden; flex: 0 0 auto;
+  transition: max-height .25s ease, padding .25s ease, opacity .25s ease, transform .25s ease;
+}
+#pause-banner.visible { max-height: 140px; padding: 8px 16px; opacity: 1; transform: translateY(0); pointer-events: auto; visibility: visible; border-bottom-width: 1px; }
+#pause-banner > div { display: flex; gap: 8px; flex-shrink: 0; }
+#dataset-badge { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

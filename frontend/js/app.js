@@ -7,6 +7,8 @@
   // ------------------------------------------------------------------
   const S = {
     mode: null,
+    revision: -1,
+    displayNow: null,
     status: null,
     aircraft: new Map(),      // hex -> 最新记录
     selected: null,           // 选中的 hex
@@ -223,11 +225,13 @@
   function refreshSelectedTrack(force) {
     if (!S.selected) return;
     const reqHex = S.selected;
+    const reqRevision = S.revision;
     fetch('/api/track?hex=' + encodeURIComponent(reqHex))
       .then((r) => r.json())
       .then((trk) => {
         // 防乱序竞争：响应 hex 必须与当前选中的航空器严格一致
-        if (!trk || S.selected !== trk.hex || S.selected !== reqHex) return;
+        if (!trk || S.selected !== trk.hex || S.selected !== reqHex ||
+            reqRevision !== S.revision || trk.display_revision !== S.revision) return;
         if (trk.count === 0 || !trk.points || trk.points.length === 0) {
           $('ip-trackpts').textContent = '0';
           if (S.selTrack) { map.removeLayer(S.selTrack); S.selTrack = null; }
@@ -351,37 +355,42 @@
   // 状态处理主入口（每秒一次）
   // ------------------------------------------------------------------
   function handleState(st) {
+    if (!st || !st.status || st.status.display_revision < S.revision) return;
     S.lastUpdate = Date.now();
-    if (!st || !st.status) return;
-
-    const prevMode = S.mode;
+    const changed = S.revision !== st.status.display_revision;
     S.status = st.status;
-    S.mode = st.status.mode;
-    if (!S.receiver && st.status.receiver) {
-      initReceiverView(st.status.receiver.lat, st.status.receiver.lon, st.status.receiver.max_range_km);
+    S.mode = st.status.display_mode || st.status.mode;
+    S.revision = st.status.display_revision;
+    S.displayNow = st.now;
+    if (changed) {
+      deselect();
+      for (const hx of Array.from(S.markers.keys())) removeMarker(hx);
+      S.aircraft.clear();
+      updateList();
     }
-
-    if (prevMode !== S.mode) {
-      if (prevMode !== null) deselect(); // 模式切换后旧选择已失效
-      const badge = $('mode-badge');
-      badge.textContent = S.mode === 'live' ? 'LIVE' : 'REPLAY';
-      badge.className = 'badge ' + (S.mode === 'live' ? 'badge-live' : 'badge-replay');
-      $('replay-ctrl').hidden = S.mode !== 'replay';
-      $('dataset-badge').textContent = st.status.dataset ? '数据集 ' + st.status.dataset : '';
-      $('st-mode').textContent = S.mode === 'live' ? '实时采集 (RTL-SDR + readsb)' : '数据集回放';
+    const receiver = st.status.receiver;
+    if (receiver && (JSON.stringify(receiver) !== S.receiverKey)) {
+      S.receiverKey = JSON.stringify(receiver);
+      initReceiverView(receiver.lat, receiver.lon, receiver.max_range_km);
     }
-
-    // 暂停指示（仅按钮图标切换，无横幅）
-    if (S.mode === 'live') updateWarmup(st.status.warmup);
+    const badge = $('mode-badge');
+    badge.textContent = S.mode === 'live' ? 'LIVE' : 'REPLAY';
+    badge.className = 'badge ' + (S.mode === 'live' ? 'badge-live' : 'badge-replay');
+    $('replay-ctrl').hidden = S.mode !== 'replay';
+    const datasets = st.status.datasets || [];
+    const datasetText = datasets.length > 1 ? `${st.status.dataset} · 共 ${datasets.length} 段` : st.status.dataset;
+    $('dataset-badge').textContent = datasetText ? '数据集 ' + datasetText : '';
+    $('dataset-badge').title = datasets.join(' → ') || datasetText || '';
+    $('st-mode').textContent = S.mode === 'live' ? '实时采集 (RTL-SDR + readsb)' : '数据集回放';
+    updateWarmup(S.mode === 'live' ? st.status.warmup : null);
     updatePausedBanner(st.status.display_paused === true);
-
-    // 暂停心跳或 display_paused：保持控制与连接状态，不覆盖航空器数据
+    updateStatusbar();
+    updateReplayCtrl();
+    if (typeof scheduleUILayout === 'function') scheduleUILayout();
     if (st.heartbeat || st.status.display_paused) {
       setConn(true);
-      if (st.status.display_paused) {
-        $('st-upd').textContent = '映射已暂停（后台采集中）';
-        return;
-      }
+      $('st-upd').textContent = '映射已暂停（后台采集中）';
+      return;
     }
 
     // 活动集
@@ -418,12 +427,14 @@
       $('st-src').style.color = src.running ? '' : 'var(--err)';
       // 报文计数：后端实际采集的 DF17 且 CRC 校验通过报文
       const ms = st.msgstats || {};
-      $('cnt-msg').textContent = String(ms.messages_df17 != null ? ms.messages_df17 : 0);
+
     } else {
       $('st-src').textContent = `${src.dataset || ''} · ${src.batch_index || 0}/${src.total_batches || 0} 批 · ${src.speed || 1}×` +
         (src.paused ? ' · 已暂停' : '');
-      $('cnt-msg').textContent = '—';
+      $('st-src').style.color = '';
     }
+    const ms = st.msgstats || {};
+    $('cnt-msg').textContent = ms.messages_df17 != null ? String(ms.messages_df17) : '—';
     const ago = Math.round((Date.now() - S.lastUpdate) / 1000);
     $('st-upd').textContent = ago <= 2 ? '刚刚更新' : `${ago} 秒前更新`;
   }
@@ -442,7 +453,7 @@
 
   function updateWarmup(wu) {
     const overlay = $('warmup-overlay');
-    if (!wu) { overlay.hidden = true; wuVisible = false; return; }
+    if (!wu) { hideModal(overlay.id); wuVisible = false; return; }
     const items = document.querySelectorAll('#wu-steps li');
     const idx = { checking_hardware: 0, initializing: 1, collecting: 2, ready: 3 }[wu.phase] ?? 0;
     items.forEach((li, i) => {
@@ -470,17 +481,17 @@
       if (!wuDoneAt) {
         wuDoneAt = Date.now();
         setTimeout(() => {
-          overlay.hidden = true;
+          hideModal(overlay.id);
           wuVisible = false;
         }, 1200);
       }
       if (Date.now() - wuDoneAt > 1200) {
-        overlay.hidden = true;
+        hideModal(overlay.id);
         wuVisible = false;
       }
     } else {
       wuDoneAt = 0;
-      overlay.hidden = false;
+      if (overlay.hidden) showModal(overlay.id);
       wuVisible = true;
     }
   }
@@ -490,9 +501,14 @@
   // ------------------------------------------------------------------
   // 暂停显示 / 终止系统
   // ------------------------------------------------------------------
-  // 无横幅：仅按钮图标/文字切换（⏸ 暂停显示 ↔ ▶ 恢复显示）
+  // 暂停采集映射与暂停回放使用不同语义。
   function updatePausedBanner(paused) {
     const btn = $('btn-pause');
+    const bannerVisible = S.mode === 'live' && paused;
+    $('pause-banner').classList.toggle('visible', bannerVisible);
+    $('pause-banner').setAttribute('aria-hidden', String(!bannerVisible));
+    $('pause-banner').inert = !bannerVisible;
+    $('btn-mode').disabled = !(S.mode === 'replay' || paused);
     if (S.mode === 'replay') {
       const srcPaused = S.status && S.status.source && S.status.source.paused;
       btn.classList.toggle('paused', !!srcPaused);
@@ -515,8 +531,8 @@
     }
   });
 
-  $('btn-shutdown').addEventListener('click', () => { $('shutdown-modal').hidden = false; });
-  $('sd-cancel').addEventListener('click', () => { $('shutdown-modal').hidden = true; });
+  $('btn-shutdown').addEventListener('click', () => { showModal('shutdown-modal'); });
+  $('sd-cancel').addEventListener('click', () => { hideModal('shutdown-modal'); });
   $('sd-confirm').addEventListener('click', async () => {
     $('sd-confirm').disabled = true;
     $('sd-confirm').textContent = '正在终止…';
@@ -524,12 +540,124 @@
     await post('/api/system/shutdown');
     // 等待后端退出、连接断开后显示收尾页
     setTimeout(() => {
-      $('shutdown-modal').hidden = true;
-      $('shutdown-done').hidden = false;
+      hideModal('shutdown-modal');
+      showModal('shutdown-done');
       $('sse-dot').className = 'dot dot-off';
       $('sse-text').textContent = '已终止';
     }, 1500);
   });
+
+  const modalFocus = new Map();
+  const modalIds = ['warmup-overlay', 'shutdown-modal', 'shutdown-done', 'dataset-modal'];
+  function showModal(id) {
+    const el = $(id);
+    if (!el.hidden) return;
+    modalFocus.set(id, document.activeElement);
+    el.hidden = false;
+    (el.querySelector('button:not([hidden]):not(:disabled)') || el.firstElementChild).focus();
+  }
+  function hideModal(id) {
+    const el = $(id);
+    if (el.hidden) return;
+    el.hidden = true;
+    const previous = modalFocus.get(id);
+    if (previous && previous.isConnected && !previous.closest('[hidden]')) previous.focus();
+    modalFocus.delete(id);
+  }
+  document.addEventListener('keydown', (e) => {
+    const id = [...modalIds].reverse().find((key) => !$(key).hidden);
+    if (!id) return;
+    if (e.key === 'Escape' && ['dataset-modal', 'shutdown-modal'].includes(id)) {
+      if (datasetBusy && id === 'dataset-modal') return;
+      hideModal(id); e.preventDefault();
+    }
+    if (e.key === 'Tab') {
+      const nodes = Array.from($(id).querySelectorAll('button:not(:disabled), input:not(:disabled), [tabindex="0"]'))
+        .filter((el) => el.getClientRects().length);
+      const first = nodes[0], last = nodes[nodes.length - 1];
+      if (!first) { e.preventDefault(); return; }
+      if (e.shiftKey && (document.activeElement === first || !nodes.includes(document.activeElement))) {
+        last.focus(); e.preventDefault();
+      } else if (!e.shiftKey && (document.activeElement === last || !nodes.includes(document.activeElement))) {
+        first.focus(); e.preventDefault();
+      }
+    }
+  });
+
+  let datasetBusy = false;
+  let datasetRequest = 0;
+  function selectedDatasets() {
+    return Array.from($('dataset-list').querySelectorAll('input:checked'), (el) => el.value);
+  }
+  function updateDatasetButtons() {
+    $('ds-play').disabled = datasetBusy || !selectedDatasets().length;
+    $('ds-cancel').disabled = datasetBusy;
+    $('ds-live').disabled = datasetBusy || !S.status || !S.status.live_available;
+    $('ds-live').title = S.status && S.status.live_available ? '返回当前实时画面' : '未启动实时采集';
+    $('ds-play').textContent = datasetBusy ? '加载中…' : '回放';
+    $('dataset-list').querySelectorAll('input').forEach((el) => { el.disabled = datasetBusy; });
+  }
+  async function openDatasetModal() {
+    hideModal('shutdown-modal');
+    showModal('dataset-modal');
+    $('ds-live').hidden = S.mode !== 'replay';
+    $('dataset-list').textContent = '正在读取数据集…';
+    $('dataset-error').textContent = '';
+    updateDatasetButtons();
+    const request = ++datasetRequest;
+    try {
+      const response = await fetch('/api/datasets');
+      if (!response.ok) throw new Error('读取数据集失败');
+      const body = await response.json();
+      if (request !== datasetRequest || $('dataset-modal').hidden) return;
+      const items = body.datasets.filter((d) => !d.collecting);
+      $('dataset-list').replaceChildren();
+      for (const ds of items) {
+        const row = document.createElement('label');
+        row.className = 'dataset-row';
+        const check = document.createElement('input');
+        check.type = 'checkbox'; check.value = ds.name;
+        check.checked = (S.status.datasets || []).includes(ds.name);
+        check.addEventListener('change', updateDatasetButtons);
+        const text = document.createElement('span');
+        text.textContent = ds.name;
+        const detail = document.createElement('small');
+        detail.textContent = `${ds.created_local || '创建时间未知'} · ${ds.kind} · ${ds.size_mb} MB`;
+        text.appendChild(detail); row.append(check, text); $('dataset-list').appendChild(row);
+      }
+      if (!items.length) $('dataset-list').textContent = '暂无可回放的历史数据集，请先完成一次采集。';
+    } catch (err) {
+      if (request === datasetRequest) {
+        $('dataset-list').textContent = '';
+        $('dataset-error').textContent = err.message;
+      }
+    }
+    updateDatasetButtons();
+  }
+  async function switchDisplay(live) {
+    if (datasetBusy) return;
+    datasetBusy = true; updateDatasetButtons();
+    $('dataset-error').textContent = '';
+    try {
+      const response = await fetch(live ? '/api/display/live' : '/api/display/replay', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: live ? undefined : JSON.stringify({ datasets: selectedDatasets() }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || '切换失败');
+      // 接口成功后读取对应快照；SSE 保持连接，版本号拦截旧响应。
+      const state = await fetch('/api/state');
+      if (!state.ok) throw new Error('模式已切换，等待状态同步，请稍后重试');
+      handleState(await state.json());
+      hideModal('dataset-modal');
+    } catch (err) { $('dataset-error').textContent = err.message; }
+    finally { datasetBusy = false; updateDatasetButtons(); }
+  }
+  ['btn-mode', 'banner-mode', 'sd-mode'].forEach((id) => $(id).addEventListener('click', openDatasetModal));
+  $('banner-resume').addEventListener('click', () => post('/api/display/resume'));
+  $('ds-cancel').addEventListener('click', () => hideModal('dataset-modal'));
+  $('ds-live').addEventListener('click', () => switchDisplay(true));
+  $('ds-play').addEventListener('click', () => switchDisplay(false));
 
   // ------------------------------------------------------------------
   // 回放控制
@@ -698,14 +826,7 @@
     }
   });
 
-  fetch('/api/meta').then((r) => r.json()).then((meta) => {
-    if (meta.receiver) initReceiverView(meta.receiver.lat, meta.receiver.lon, meta.receiver.max_range_km);
-    if (!S.status) {
-      S.status = meta;
-      S.mode = meta.mode;
-      updatePausedBanner(meta.display_paused === true);
-    }
-  }).catch(() => {});
+  fetch('/api/state').then((r) => r.json()).then(handleState).catch(() => {});
 
   connectSSE();
 })();
