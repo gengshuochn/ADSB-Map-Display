@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -108,6 +108,12 @@ class ReplayDataset:
     kind: str                  # "tracks" | "history"
     total_bytes: int
 
+    meta: dict = field(default_factory=dict)
+
+    @property
+    def sort_key(self):
+        return (self.meta.get("created_utc") or self.meta.get("created_local") or self.name, self.name)
+
     @property
     def size_mb(self) -> float:
         return self.total_bytes / 1e6
@@ -168,7 +174,7 @@ def scan_replay_datasets(data_root: Path | None = None) -> list[ReplayDataset]:
     data_root = data_root or config.DATA_DIR
     out: list[ReplayDataset] = []
     if not data_root.is_dir():
-        return out
+        return sorted(out, key=lambda ds: ds.sort_key)
     for d in sorted(data_root.iterdir()):
         if not d.is_dir():
             continue
@@ -187,13 +193,20 @@ def scan_replay_datasets(data_root: Path | None = None) -> list[ReplayDataset]:
             kind = "history"
         else:
             continue
+        try:
+            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+            if not isinstance(meta, dict):
+                meta = {}
+        except (OSError, ValueError):
+            meta = {}
         out.append(
             ReplayDataset(
                 name=d.name,
+                meta=meta,
                 root=d,
                 files=files,
                 kind=kind,
                 total_bytes=sum(f.stat().st_size for f in files),
             )
         )
-    return out
+    return sorted(out, key=lambda ds: ds.sort_key)

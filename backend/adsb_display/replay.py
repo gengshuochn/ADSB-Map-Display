@@ -14,6 +14,7 @@ import logging
 import math
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from . import config
@@ -23,8 +24,14 @@ log = logging.getLogger("adsb.replay")
 
 
 class ReplaySource:
-    def __init__(self, dataset: ReplayDataset, speed: float = 1.0, loop: bool = True):
-        self.dataset = dataset
+    def __init__(self, dataset: ReplayDataset | list[ReplayDataset], speed: float = 1.0, loop: bool = True):
+        self.datasets = sorted(dataset if isinstance(dataset, list) else [dataset], key=lambda d: d.sort_key)
+        self.dataset = self.datasets[0]
+        self.batch_times: list[float] = []
+        self.batch_segments: list[int] = []
+        self.segment_starts: list[int] = []
+        self._active_segment = None
+        self.on_segment = None  # callable(dataset)
         self.speed = max(0.1, speed) if math.isfinite(speed) and speed > 0 else 1.0
         self.loop = loop
         self.batches: list[list[dict]] = []
@@ -42,33 +49,33 @@ class ReplaySource:
     # ------------------------------------------------------------------
     def load(self) -> int:
         """解析全部回放文件为批次列表及时间戳，返回批次数。"""
-        self.batches = []
-        raw_ts: list[float | None] = []
-        for f in self.dataset.files:
-            for ts, recs in self._parse_file(f):
-                self.batches.append(recs)
-                raw_ts.append(ts)
-        if not self.batches:
-            log.warning("数据集 %s 未解析出任何批次", self.dataset.name)
-            self.batch_offsets = []
-            return 0
-
-        # 计算各批次相对于首批的时间偏移（秒）
-        offsets: list[float] = []
-        first_valid_ts = next((t for t in raw_ts if t is not None), None)
-        if first_valid_ts is not None:
-            last_off = 0.0
-            for ts in raw_ts:
-                if ts is not None:
-                    off = max(0.0, ts - first_valid_ts)
-                    offsets.append(off)
-                    last_off = off
-                else:
-                    last_off += 1.0
-                    offsets.append(last_off)
-        else:
-            offsets = [float(i) for i in range(len(self.batches))]
-        self.batch_offsets = offsets
+        self.batches, self.batch_times, self.batch_offsets = [], [], []
+        self.batch_segments, self.segment_starts = [], []
+        for segment, ds in enumerate(self.datasets):
+            rows = [row for f in ds.files for row in self._parse_file(f)]
+            if not rows:
+                raise ValueError(f"数据集 {ds.name} 无法解析出回放批次")
+            self.segment_starts.append(len(self.batches))
+            # 无时间戳的旧格式使用元数据起点，仍兼容历史纯平铺日志。
+            anchor = time.time()
+            for key in ("created_utc", "created_local"):
+                try:
+                    anchor = datetime.fromisoformat(ds.meta[key].replace("Z", "+00:00")).timestamp()
+                    break
+                except (KeyError, ValueError, TypeError, AttributeError):
+                    pass
+            last = None
+            for ts, records in rows:
+                valid = isinstance(ts, (float, int)) and math.isfinite(ts)
+                now = float(ts) if valid else (last + 1 if last is not None else anchor)
+                if last is not None and now < last:
+                    raise ValueError(f"数据集 {ds.name} 批次时间倒退")
+                step = max(0.1, now - last) if last is not None else 1.0
+                self.batch_offsets.append((self.batch_offsets[-1] + step) if self.batch_offsets else 0.0)
+                self.batches.append(records)
+                self.batch_times.append(now)
+                self.batch_segments.append(segment)
+                last = now
         return len(self.batches)
 
     @staticmethod
@@ -82,7 +89,7 @@ class ReplaySource:
             if isinstance(doc, dict) and "aircraft" in doc:
                 recs = [a for a in doc["aircraft"] if isinstance(a, dict)]
                 ts = float(doc["now"]) if "now" in doc else None
-                return [(ts, recs)] if recs else []
+                return [(ts, recs)]
         except json.JSONDecodeError:
             pass
 
@@ -119,25 +126,47 @@ class ReplaySource:
         return results
 
     # ------------------------------------------------------------------
+    def _time_at(self, index):
+        return self.batch_times[index] if self.batch_times else self._t0 + self.batch_offsets[index]
+
+    def _segment_at(self, index):
+        return self.batch_segments[index] if self.batch_segments else 0
+
+    def _prepare_segment(self, index, reset=False):
+        segment = self._segment_at(index)
+        if segment != self._active_segment:
+            self._active_segment = segment
+            self.dataset = self.datasets[segment]
+            if self.on_segment:
+                self.on_segment(self.dataset)
+            reset = True
+        if reset and self.on_reset:
+            self.on_reset()
+
+    def _emit(self, index):
+        if self.on_batch:
+            self.on_batch(self.batches[index], self._time_at(index))
+
     def start(self) -> None:
         if not self.batches:
             self.load()
-        self._t0 = time.time()
+        self._stop.clear()
         self._thread = threading.Thread(target=self._run, name="adsb-replay", daemon=True)
         self._thread.start()
-        log.info("回放已启动: %s 批次=%d 速度=%.1fx loop=%s", self.dataset.name, len(self.batches), self.speed, self.loop)
 
     def stop(self) -> None:
         self._stop.set()
         with self._cond:
             self._cond.notify_all()
-        if self._thread:
+        if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=5)
-        log.info("回放已停止")
+            if self._thread.is_alive():
+                raise RuntimeError("回放线程未能停止")
 
     def pause(self) -> None:
         with self._cond:
             self._paused = True
+            self._cond.notify_all()
 
     def resume(self) -> None:
         with self._cond:
@@ -145,110 +174,74 @@ class ReplaySource:
             self._cond.notify_all()
 
     def set_speed(self, v: float) -> None:
-        if not math.isfinite(v) or v <= 0:
-            return
-        with self._cond:
-            self.speed = max(0.1, min(60.0, v))
+        if math.isfinite(v) and v > 0:
+            with self._cond:
+                self.speed = max(0.1, min(60.0, v))
+                self._cond.notify_all()
 
     def seek(self, idx: int) -> None:
-        total = len(self.batches)
-        if total == 0:
+        if not self.batches:
             return
-        target = max(0, min(total - 1, idx))
         with self._cond:
+            target = max(0, min(len(self.batches) - 1, idx))
             self._seek_version += 1
             self._batch_index = target
-            # 无论向前或向后跳转，重置状态库并重放状态以精确复原活动航空器与完整轨迹
+            self._prepare_segment(target, reset=True)
+            segment = self._segment_at(target)
+            start = self.segment_starts[segment] if self.segment_starts else 0
             if self.on_reset:
-                try:
-                    self.on_reset()
-                    if self.on_batch:
-                        # 重建目标点前最多 TRACK_MAX_POINTS 批次，保证航迹完整与视野准确
-                        start_j = max(0, target - config.TRACK_MAX_POINTS)
-                        for j in range(start_j, target + 1):
-                            now_j = self._t0 + self.batch_offsets[j]
-                            self.on_batch(self.batches[j], now_j)
-                except Exception:  # noqa: BLE001
-                    log.exception("Seek 状态重置异常")
-            elif self._paused and self.on_batch:
-                try:
-                    now_target = self._t0 + self.batch_offsets[target]
-                    self.on_batch(self.batches[target], now_target)
-                except Exception:  # noqa: BLE001
-                    pass
+                start = max(start, target - config.TRACK_MAX_POINTS)
+                for j in range(start, target + 1):
+                    self._emit(j)
+            else:
+                self._emit(target)
             self._cond.notify_all()
 
     def current_time(self) -> float:
-        """回放时钟：随批次推进。"""
-        if not self.batches or not self.batch_offsets:
-            return self._t0
-        idx = max(0, min(len(self.batch_offsets) - 1, self._batch_index))
-        return self._t0 + self.batch_offsets[idx]
+        with self._cond:
+            return self._time_at(self._batch_index) if self.batches else self._t0
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            if not self.batches:
-                self._stop.wait(1.0)
-                continue
-            with self._cond:
+        # 回调、跳转与批次索引在同一把锁内提交，不会暴露半次重建快照。
+        with self._cond:
+            while not self._stop.is_set():
                 while self._paused and not self._stop.is_set():
-                    self._cond.wait(timeout=0.5)
+                    self._cond.wait()
                 if self._stop.is_set():
                     break
-                cur_v = self._seek_version
                 i = self._batch_index
-                recs = self.batches[i]
-                now = self._t0 + self.batch_offsets[i]
-
-            try:
-                if self.on_batch:
-                    self.on_batch(recs, now)
-            except Exception:  # noqa: BLE001
-                log.exception("回放回调异常")
-
-            # 计算下一批的等待间隔
-            nxt_idx = i + 1
-            if nxt_idx < len(self.batch_offsets):
-                step_s = max(0.1, min(30.0, self.batch_offsets[nxt_idx] - self.batch_offsets[i]))
-            else:
-                step_s = 1.0
-            wait_s = step_s / self.speed
-
-            with self._cond:
-                self._cond.wait(timeout=wait_s)
+                version = self._seek_version
+                self._prepare_segment(i)
+                self._emit(i)
+                nxt = i + 1
+                remaining = (self.batch_offsets[nxt] - self.batch_offsets[i]) if nxt < len(self.batches) else 1.0
+                while remaining > 0 and not self._stop.is_set() and version == self._seek_version:
+                    if self._paused:
+                        self._cond.wait()
+                        continue
+                    speed = self.speed
+                    before = time.monotonic()
+                    self._cond.wait(timeout=remaining / speed)
+                    remaining -= (time.monotonic() - before) * speed
                 if self._stop.is_set():
                     break
-                if self._seek_version != cur_v:
-                    # 在等待或回调期间发生 seek，跳过旧索引推进
+                if version != self._seek_version:
                     continue
-                if self._paused:
-                    continue
-
-                nxt = self._batch_index + 1
                 if nxt >= len(self.batches):
-                    if self.loop:
-                        nxt = 0
-                        self._t0 = time.time()
-                        if self.on_reset:
-                            try:
-                                self.on_reset()
-                            except Exception:  # noqa: BLE001
-                                pass
-                    else:
+                    if not self.loop:
                         self._paused = True
                         continue
+                    nxt = 0
+                    self._prepare_segment(nxt, reset=True)
                 self._batch_index = nxt
 
-    # ------------------------------------------------------------------
     def status(self) -> dict:
-        return {
-            "kind": "replay",
-            "dataset": self.dataset.name,
-            "dataset_root": str(self.dataset.root),
-            "files": [f.name for f in self.dataset.files],
-            "total_batches": len(self.batches),
-            "batch_index": self._batch_index,
-            "paused": self._paused,
-            "speed": self.speed,
-            "loop": self.loop,
-        }
+        with self._cond:
+            return {
+                "kind": "replay", "dataset": self.dataset.name,
+                "datasets": [d.name for d in self.datasets],
+                "dataset_root": str(self.dataset.root),
+                "files": [f.name for d in self.datasets for f in d.files],
+                "total_batches": len(self.batches), "batch_index": self._batch_index,
+                "paused": self._paused, "speed": self.speed, "loop": self.loop,
+            }

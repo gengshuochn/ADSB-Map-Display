@@ -13,6 +13,7 @@ from urllib.parse import urlparse, parse_qs
 from . import config
 from .dataset import scan_replay_datasets
 from .state import AircraftStore
+from .replay import ReplaySource
 
 log = logging.getLogger("adsb.server")
 
@@ -29,52 +30,163 @@ MIME = {
 
 
 class AppContext:
-    """服务运行上下文：状态库 + 数据源(live/replay) + 预热/暂停控制 + 元信息。"""
+    """采集生命周期独立于显示源；回放快照、跳转和回调共享可重入锁。"""
 
     def __init__(self, mode: str, store: AircraftStore, source, receiver: dict, dataset_name: str | None,
                  warmup=None, df17_counter=None, shutdown_cb=None):
-        self.mode = mode  # "live" | "replay"
-        self.store = store
-        self.source = source  # LiveCollector | ReplaySource | None
-        self.receiver = receiver
+        self._lock = threading.RLock()
+        self._switch_lock = threading.Lock()
+        self.display_mode = mode
+        self.live_available = mode == "live" and source is not None
+        self.store_live = store if mode == "live" else None
+        self.store_replay = store if mode == "replay" else None
+        self.live_source = source if self.live_available else None
+        self.replay_source = source if mode == "replay" else None
+        self.live_receiver = dict(receiver)
+        self.replay_receiver = dict(receiver)
+        self.collecting_dataset = dataset_name if self.live_available else None
         self.dataset_name = dataset_name
         self.started_at = time.time()
         self.state_version = 0
-        self.warmup = warmup          # Warmup 实例（live 模式）
-        self.df17_counter = df17_counter  # Df17Counter 实例（live 模式）
-        self.display_paused = False   # True: 后台继续采集, 前端停止映射
+        self.display_revision = 0
+        self.warmup = warmup
+        self.df17_counter = df17_counter
+        self.display_paused = False
         self.shutdown_cb = shutdown_cb or (lambda: None)
+        self._closed = False
+        if isinstance(self.replay_source, ReplaySource):
+            self._bind_replay(self.replay_source)
+
+    @property
+    def mode(self):
+        return self.display_mode
+
+    @property
+    def store(self):
+        return self.store_live if self.display_mode == "live" else self.store_replay
+
+    @property
+    def source(self):
+        return self.live_source if self.display_mode == "live" else self.replay_source
+
+    @property
+    def receiver(self):
+        return self.live_receiver if self.display_mode == "live" else self.replay_receiver
+
+    def _bind_replay(self, src):
+        src._cond = threading.Condition(self._lock)
+
+        def segment(ds):
+            self.replay_receiver = dict(self.live_receiver)
+            metadata = ds.meta.get("receiver")
+            if isinstance(metadata, dict):
+                self.replay_receiver.update({k: v for k, v in metadata.items() if v is not None})
+            self.store_replay = AircraftStore(self.replay_receiver.get("lat", 0), self.replay_receiver.get("lon", 0))
+            self.dataset_name = ds.name
+
+        def reset():
+            self.store_replay.reset()
+            self.display_revision += 1
+
+        def batch(records, now):
+            self.store_replay.apply_batch(records, now)
+            self.store_replay.prune(now)
+
+        src.on_segment, src.on_reset, src.on_batch = segment, reset, batch
 
     def clock_now(self) -> float:
-        if self.mode == "replay" and self.source is not None:
-            return self.source.current_time()
+        if self.display_mode == "replay" and self.replay_source is not None:
+            return self.replay_source.current_time()
         return time.time()
 
     def status(self) -> dict:
-        st = {
-            "mode": self.mode,
-            "dataset": self.dataset_name,
-            "started_at": self.started_at,
-            "uptime_s": round(time.time() - self.started_at, 1),
-            "receiver": self.receiver,
-            "aircraft_count": self.store.aircraft_count(),
-            "display_paused": self.display_paused,
-        }
-        if self.warmup is not None:
-            st["warmup"] = self.warmup.status()
-        if self.df17_counter is not None:
-            st["msgstats"] = self.df17_counter.status()
-        if self.source is not None and hasattr(self.source, "status"):
-            st["source"] = self.source.status()
-        return st
+        with self._lock:
+            st = {
+                "mode": self.display_mode, "display_mode": self.display_mode,
+                "display_revision": self.display_revision,
+                "live_available": self.live_available,
+                "dataset": self.collecting_dataset if self.display_mode == "live" else self.dataset_name,
+                "datasets": [d.name for d in self.replay_source.datasets] if isinstance(self.replay_source, ReplaySource) and self.display_mode == "replay" else [],
+                "started_at": self.started_at,
+                "uptime_s": round(time.time() - self.started_at, 1),
+                "receiver": self.receiver,
+                "aircraft_count": self.store.aircraft_count(),
+                "display_paused": self.display_paused,
+                "collecting_source": self.live_source.status() if self.live_source is not None else None,
+            }
+            if self.warmup is not None:
+                st["warmup"] = self.warmup.status()
+            if self.df17_counter is not None:
+                st["msgstats"] = self.df17_counter.status()
+            if self.source is not None:
+                st["source"] = self.source.status()
+            return st
 
     def snapshot(self) -> dict:
-        now = self.clock_now()
-        return {
-            "now": now,
-            "status": self.status(),
-            "aircraft": self.store.snapshot(now),
-        }
+        with self._lock:
+            now = self.clock_now()
+            result = {"now": now, "status": self.status(), "aircraft": []}
+            if self.display_paused:
+                result["heartbeat"] = True
+            else:
+                result["aircraft"] = self.store.snapshot(now)
+                result["status"]["aircraft_count"] = len(result["aircraft"])
+            return result
+
+    def track(self, hx, limit=None):
+        with self._lock:
+            result = self.store.track(hx, limit) or {"hex": hx, "count": 0, "points": []}
+            return dict(result, display_revision=self.display_revision)
+
+    def datasets(self):
+        return [{"name": d.name, "kind": d.kind, "files": [f.name for f in d.files],
+                 "size_mb": round(d.size_mb, 3), "created_local": d.meta.get("created_local"),
+                 "collecting": d.name == self.collecting_dataset}
+                for d in scan_replay_datasets()]
+
+    def switch_replay(self, names):
+        if not isinstance(names, list) or not names or any(not isinstance(n, str) for n in names):
+            raise ValueError("请选择至少一个有效数据集")
+        with self._switch_lock:
+            if self._closed:
+                raise ValueError("服务正在退出")
+            available = {d.name: d for d in scan_replay_datasets()}
+            if len(set(names)) != len(names) or any(n not in available or n == self.collecting_dataset for n in names):
+                raise ValueError("数据集无效或正在采集中")
+            candidate = ReplaySource([available[n] for n in names])
+            candidate.load()  # 加载失败时，原回放和显示状态不变。
+            old = self.replay_source
+            if old is not None:
+                old.stop()  # join 不能持有回放共享锁。
+            with self._lock:
+                self._bind_replay(candidate)
+                self.replay_source = candidate
+                self.display_mode = "replay"
+                self.display_paused = False
+                candidate.seek(0)
+                candidate.start()
+                return self.status()
+
+    def switch_live(self):
+        with self._switch_lock:
+            if not self.live_available or self._closed:
+                raise ValueError("未启动实时采集，无法返回实时")
+            if self.replay_source is not None:
+                self.replay_source.stop()
+            with self._lock:
+                self.replay_source = None
+                self.display_mode = "live"
+                self.display_paused = False
+                self.display_revision += 1
+                return self.status()
+
+    def close(self):
+        with self._switch_lock:
+            self._closed = True
+            if self.replay_source is not None:
+                self.replay_source.stop()
+
+
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -110,16 +222,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/health":
                 self._json({"ok": True})
             elif path == "/api/state":
-                self.ctx.state_version += 1
-                if self.ctx.display_paused:
-                    self._json({
-                        "now": self.ctx.clock_now(),
-                        "heartbeat": True,
-                        "status": self.ctx.status(),
-                        "aircraft": [],
-                    })
-                else:
-                    self._json(self.ctx.snapshot())
+                self._json(self.ctx.snapshot())
             elif path == "/api/stream":
                 self._handle_stream()
             elif path == "/api/track":
@@ -137,18 +240,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not hx:
                     self._json({"error": "missing hex"}, 400)
                     return
-                trk = self.ctx.store.track(hx, limit=limit or None)
+                trk = self.ctx.track(hx, limit=limit or None)
                 self._json(trk or {"hex": hx, "count": 0, "points": []})
             elif path == "/api/datasets":
-                items = []
-                for d in scan_replay_datasets():
-                    items.append({
-                        "name": d.name,
-                        "kind": d.kind,
-                        "files": [f.name for f in d.files],
-                        "size_mb": round(d.size_mb, 3),
-                    })
-                self._json({"datasets": items})
+                self._json({"datasets": self.ctx.datasets()})
             elif path == "/api/meta":
                 self._json(self.ctx.status())
             else:
@@ -170,13 +265,29 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "message": "shutting down"})
             threading.Thread(target=self.ctx.shutdown_cb, daemon=True).start()
             return
-        if path == "/api/display/pause":
-            self.ctx.display_paused = True
-            self._json({"ok": True, "display_paused": True})
+        if path in ("/api/display/replay", "/api/display/live"):
+            try:
+                if path.endswith("/replay"):
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 65536:
+                        raise ValueError("请求正文大小无效")
+                    body = json.loads(self.rfile.read(length))
+                    if not isinstance(body, dict):
+                        raise ValueError("请求正文必须是 JSON 对象")
+                    status = self.ctx.switch_replay(body.get("datasets"))
+                else:
+                    status = self.ctx.switch_live()
+                self._json({"ok": True, "status": status})
+            except (ValueError, OSError, TypeError) as exc:
+                self._json({"error": str(exc)}, 400)
             return
-        if path == "/api/display/resume":
-            self.ctx.display_paused = False
-            self._json({"ok": True, "display_paused": False})
+        if path in ("/api/display/pause", "/api/display/resume"):
+            with self.ctx._lock:
+                if self.ctx.display_mode != "live":
+                    self._json({"error": "not in live display mode"}, 400)
+                    return
+                self.ctx.display_paused = path.endswith("/pause")
+                self._json({"ok": True, "display_paused": self.ctx.display_paused})
             return
         if path == "/api/warmup/skip":
             if self.ctx.warmup is None:
@@ -186,38 +297,39 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "skipped": changed, "warmup": self.ctx.warmup.status()})
             return
         if path.startswith("/api/replay/"):
-            if self.ctx.mode != "replay" or self.ctx.source is None:
-                self._json({"error": "not in replay mode"}, 400)
-                return
-            action = path.rsplit("/", 1)[-1]
-            src = self.ctx.source
-            if action == "pause":
-                src.pause()
-            elif action == "resume":
-                src.resume()
-            elif action == "speed":
-                qs = parse_qs(parsed.query)
-                try:
-                    val = float((qs.get("value") or ["1"])[0])
-                    if not math.isfinite(val) or val <= 0:
+            with self.ctx._switch_lock:
+                if self.ctx.mode != "replay" or self.ctx.source is None:
+                    self._json({"error": "not in replay mode"}, 400)
+                    return
+                action = path.rsplit("/", 1)[-1]
+                src = self.ctx.source
+                if action == "pause":
+                    src.pause()
+                elif action == "resume":
+                    src.resume()
+                elif action == "speed":
+                    qs = parse_qs(parsed.query)
+                    try:
+                        val = float((qs.get("value") or ["1"])[0])
+                        if not math.isfinite(val) or val <= 0:
+                            self._json({"error": "bad speed"}, 400)
+                            return
+                        src.set_speed(val)
+                    except ValueError:
                         self._json({"error": "bad speed"}, 400)
                         return
-                    src.set_speed(val)
-                except ValueError:
-                    self._json({"error": "bad speed"}, 400)
+                elif action == "seek":
+                    qs = parse_qs(parsed.query)
+                    try:
+                        idx = int((qs.get("index") or ["0"])[0])
+                    except ValueError:
+                        self._json({"error": "bad index"}, 400)
+                        return
+                    src.seek(idx)
+                else:
+                    self._json({"error": "unknown action"}, 404)
                     return
-            elif action == "seek":
-                qs = parse_qs(parsed.query)
-                try:
-                    idx = int((qs.get("index") or ["0"])[0])
-                except ValueError:
-                    self._json({"error": "bad index"}, 400)
-                    return
-                src.seek(idx)
-            else:
-                self._json({"error": "unknown action"}, 404)
-                return
-            self._json({"ok": True, "source": src.status()})
+                self._json({"ok": True, "source": src.status()})
         else:
             self._json({"error": "not found"}, 404)
 
@@ -232,15 +344,7 @@ class Handler(BaseHTTPRequestHandler):
         log.info("SSE 客户端接入: %s", self.address_string())
         try:
             while True:
-                if self.ctx.display_paused:
-                    # 暂停期间不发航空器快照（前端冻结画面），仅心跳证明连接存活
-                    payload = json.dumps({
-                        "now": self.ctx.clock_now(),
-                        "heartbeat": True,
-                        "status": {"mode": self.ctx.mode, "display_paused": True},
-                    }, ensure_ascii=False)
-                else:
-                    payload = json.dumps(self.ctx.snapshot(), ensure_ascii=False)
+                payload = json.dumps(self.ctx.snapshot(), ensure_ascii=False)
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
                 time.sleep(1.0)

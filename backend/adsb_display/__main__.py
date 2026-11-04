@@ -81,6 +81,7 @@ def cmd_serve(args) -> int:
 
     store = AircraftStore(receiver["lat"], receiver["lon"])
     source = None
+    src = None
     dataset_name = None
     warmup: Warmup | None = None
     df17_counter: Df17Counter | None = None
@@ -137,17 +138,17 @@ def cmd_serve(args) -> int:
             raise SystemExit(f"数据集 {ds.name} 无法解析出回放批次。")
         log.info("回放数据集: data/%s", ds.name)
 
+    ctx = None
     httpd = None
     http_thread = None
     source = None
     try:
-        if args.mode == "live":
+        if args.mode == "live" and src is not None:
             df17_counter.start()
             src.start()
             source = src
             warmup.set("collecting", "正在收集数据… 等待报文")
         else:
-            src.start()
             source = src
 
         ctx = AppContext(
@@ -155,6 +156,8 @@ def cmd_serve(args) -> int:
             dataset_name=dataset_name, warmup=warmup, df17_counter=df17_counter,
             shutdown_cb=shutdown_event.set,
         )
+        if args.mode == "replay":
+            source.start()
         httpd = make_server(ctx, args.port)
         log.info("服务已启动: http://127.0.0.1:%d  (mode=%s dataset=%s)", args.port, args.mode, dataset_name)
 
@@ -180,6 +183,8 @@ def cmd_serve(args) -> int:
             httpd.shutdown()
         if http_thread is not None:
             http_thread.join(timeout=3)
+        if ctx is not None:
+            ctx.close()
         if df17_counter is not None:
             df17_counter.stop()
         if source is not None:
