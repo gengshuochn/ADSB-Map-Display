@@ -7,6 +7,8 @@
   // ------------------------------------------------------------------
   const S = {
     mode: null,
+    sessionId: null,
+    retiredSessions: new Set(),
     revision: -1,
     displayNow: null,
     status: null,
@@ -262,7 +264,7 @@
       }
       S.panelRecord = { ...rec };
       S.panelOrigin = {
-        mode: S.mode, dataset: S.status.dataset, revision: S.revision, now: S.displayNow,
+        mode: S.mode, dataset: S.status.dataset, sessionId: S.sessionId, revision: S.revision, now: S.displayNow,
       };
       updateSelectionVisual();
     } else if (S.selected) {
@@ -281,6 +283,7 @@
   function refreshSelectedTrack(force) {
     if (!S.selected) return;
     const reqHex = S.selected;
+    const reqSession = S.sessionId;
     const reqRevision = S.revision;
     const reqEpoch = S.selectionEpoch;
     fetch('/api/track?hex=' + encodeURIComponent(reqHex))
@@ -288,6 +291,7 @@
       .then((trk) => {
         // 防乱序竞争：响应 hex 必须与当前选中的航空器严格一致
         if (!trk || S.selected !== trk.hex || S.selected !== reqHex ||
+            reqSession !== S.sessionId || trk.session_id !== S.sessionId ||
             reqRevision !== S.revision || trk.display_revision !== S.revision ||
             reqEpoch !== S.selectionEpoch || !S.panelOpen) return;
         S.panelTrackCount = trk.count;
@@ -327,7 +331,7 @@
     const rec = S.panelRecord;
     const active = S.selected === S.panelTarget && S.aircraft.has(S.panelTarget);
     const origin = S.panelOrigin;
-    const changed = origin.revision !== S.revision;
+    const changed = origin.sessionId !== S.sessionId || origin.revision !== S.revision;
     $('ip-state').textContent = active ? (S.mode === 'live' ? '实时目标' : '回放目标') :
       (changed ? '来源 / 时刻已变化' : '已失联');
     $('ip-state').classList.toggle('cached', !active);
@@ -470,9 +474,15 @@
   // 状态处理主入口（每秒一次）
   // ------------------------------------------------------------------
   function handleState(st) {
-    if (!st || !st.status || st.status.display_revision < S.revision) return;
+    if (!st || !st.status) return;
+    const sessionId = st.status.session_id;
+    if (S.retiredSessions.has(sessionId)) return;
+    const sessionChanged = sessionId !== S.sessionId;
+    if (!sessionChanged && st.status.display_revision < S.revision) return;
+    if (sessionChanged && S.sessionId !== null) S.retiredSessions.add(S.sessionId);
     S.lastUpdate = Date.now();
-    const changed = S.revision !== st.status.display_revision;
+    const changed = sessionChanged || S.revision !== st.status.display_revision;
+    S.sessionId = sessionId;
     S.status = st.status;
     S.mode = st.status.display_mode || st.status.mode;
     S.revision = st.status.display_revision;
@@ -819,13 +829,17 @@
   // ------------------------------------------------------------------
   // 回放控制
   // ------------------------------------------------------------------
+  let seekPointerId = null;
+  let seekKeyDown = false;
+  const seekKeys = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown']);
   function updateReplayCtrl() {
     const src = S.status && S.status.source;
     if (!src || S.mode !== 'replay') return;
     $('rp-toggle').textContent = src.paused ? '▶' : '⏸';
     const seek = $('rp-seek');
     seek.max = Math.max(0, (src.total_batches || 1) - 1);
-    if (document.activeElement !== seek) seek.value = src.batch_index || 0;
+    // 松开鼠标/按键后即恢复同步，保留焦点以支持继续使用键盘。
+    if (seekPointerId === null && !seekKeyDown) seek.value = src.batch_index || 0;
     $('rp-progress').textContent = `${src.batch_index || 0}/${src.total_batches || 0}`;
     if (String(src.speed || 1) !== $('rp-speed').value) {
       $('rp-speed').value = String(src.speed || 1);
@@ -836,6 +850,18 @@
     const paused = S.status && S.status.source && S.status.source.paused;
     post(paused ? '/api/replay/resume' : '/api/replay/pause');
   });
+  $('rp-seek').addEventListener('pointerdown', (e) => { seekPointerId = e.pointerId; });
+  ['pointerup', 'pointercancel'].forEach((type) => document.addEventListener(type, (e) => {
+    if (e.pointerId === seekPointerId) seekPointerId = null;
+  }, { capture: true }));
+  $('rp-seek').addEventListener('keydown', (e) => {
+    if (seekKeys.has(e.key)) seekKeyDown = true;
+  });
+  $('rp-seek').addEventListener('keyup', (e) => {
+    if (seekKeys.has(e.key)) seekKeyDown = false;
+  });
+  $('rp-seek').addEventListener('blur', () => { seekKeyDown = false; });
+  window.addEventListener('blur', () => { seekPointerId = null; seekKeyDown = false; });
   $('rp-seek').addEventListener('change', (e) => {
     post('/api/replay/seek?index=' + e.target.value);
   });

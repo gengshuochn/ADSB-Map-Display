@@ -6,6 +6,7 @@ import logging
 import math
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -47,6 +48,7 @@ class AppContext:
         self.collecting_dataset = dataset_name if self.live_available else None
         self.dataset_name = dataset_name
         self.started_at = time.time()
+        self.session_id = uuid.uuid4().hex
         self.state_version = 0
         self.display_revision = 0
         self.warmup = warmup
@@ -112,6 +114,7 @@ class AppContext:
             st = {
                 "mode": self.display_mode, "display_mode": self.display_mode,
                 "display_revision": self.display_revision,
+                "session_id": self.session_id,
                 "live_available": self.live_available,
                 "dataset": self.collecting_dataset if self.display_mode == "live" else self.dataset_name,
                 "datasets": [d.name for d in self.replay_source.datasets] if isinstance(self.replay_source, ReplaySource) and self.display_mode == "replay" else [],
@@ -144,7 +147,7 @@ class AppContext:
     def track(self, hx, limit=None):
         with self._lock:
             result = self.store.track(hx, limit) or {"hex": hx, "count": 0, "points": []}
-            return dict(result, display_revision=self.display_revision)
+            return dict(result, display_revision=self.display_revision, session_id=self.session_id)
 
     def datasets(self):
         return [{"name": d.name, "kind": d.kind, "files": [f.name for f in d.files],

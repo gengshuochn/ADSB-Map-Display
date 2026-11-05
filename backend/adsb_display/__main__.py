@@ -126,6 +126,7 @@ def cmd_serve(args) -> int:
             # DF17 报文统计：直连 readsb raw 端口独立校验 CRC，仅计 DF17 且校验通过
             df17_counter = Df17Counter(config.READSB_RAW_HOST, config.READSB_RAW_PORT)
             src.on_batch = _live_batch
+            src.on_tick = store.prune
     else:
         ds = pick_replay_dataset(args.dataset)
         if ds is None:

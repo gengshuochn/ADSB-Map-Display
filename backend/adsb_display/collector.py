@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 import threading
 import time
@@ -39,6 +40,7 @@ class LiveCollector:
         self.messages_total = 0
         self.last_error: str | None = None
         self.last_poll_ts: float = 0.0
+        self.last_snapshot_ts: float | None = None
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.tracks_file = ds.logs / f"tracks-{ts}.jsonl"
@@ -54,7 +56,8 @@ class LiveCollector:
             "--ppm", str(self.ppm),
             "--lat", str(self.lat),
             "--lon", str(self.lon),
-            "--max-range", str(self.max_range),
+            # 配置、元数据与地图使用 km；readsb 的 --max-range 使用海里。
+            "--max-range", str(self.max_range / 1.852),
             "--write-json", str(self.ds.live),
             "--write-json-every", "1",
             "--dump-beast", f"{self.ds.beast},3600,10",
@@ -112,49 +115,66 @@ class LiveCollector:
         """轮询线程：每秒读取 aircraft.json，推送回调并追加 tracks jsonl。"""
         aircraft_json = self.ds.live / "aircraft.json"
         poll_deadline = 0.0
+        retry_deadline = 0.0
         while not self._stop.is_set():
             now = time.time()
-            # readsb 进程守护
-            if self.proc and self.proc.poll() is not None:
-                if self.last_error is None:
-                    self.last_error = "readsb 进程退出，3 秒后重试"
-                    log.warning(self.last_error)
-                time.sleep(3.0)
-                if self._stop.is_set():
-                    break
-                self.restarts += 1
-                self.last_error = None
-                self._spawn()
-                continue
-
             if now >= poll_deadline:
                 poll_deadline = now + 1.0
                 try:
-                    batch = self._poll(aircraft_json, now)
-                    self.on_batch and self.on_batch(batch, now)
+                    # 重试等待不阻塞状态老化，也不读取退出进程遗留的快照。
+                    if self.proc is None or self.proc.poll() is not None:
+                        if self.last_error is None:
+                            self.last_error = "readsb 进程退出，3 秒后重试"
+                            log.warning(self.last_error)
+                        if not retry_deadline:
+                            retry_deadline = now + 3.0
+                        elif now >= retry_deadline:
+                            self.restarts += 1
+                            self.last_error = None
+                            self._spawn()
+                            retry_deadline = now + 3.0
+                    else:
+                        retry_deadline = 0.0
+                        batch = self._poll(aircraft_json, now)
+                        if batch is not None and self.on_batch:
+                            self.on_batch(batch, self.last_snapshot_ts)
                 except FileNotFoundError:
                     pass  # aircraft.json 尚未生成
                 except Exception as e:  # noqa: BLE001
                     log.exception("轮询异常: %s", e)
+                finally:
+                    # 文件缺失、损坏、停止更新或进程重启期间仍按墙钟清理失联目标。
+                    if self.on_tick:
+                        self.on_tick(time.time())
             self._stop.wait(0.1)
 
     on_batch = None  # callable(records: list[dict], now: float)
+    on_tick = None   # callable(now: float)，独立于解码器是否产生新快照
 
-    def _poll(self, path: Path, now: float) -> list[dict]:
+    def _poll(self, path: Path, now: float) -> list[dict] | None:
         raw = path.read_text(encoding="utf-8")
         data = json.loads(raw)
+        snapshot_ts = data.get("now")
+        if (isinstance(snapshot_ts, bool) or not isinstance(snapshot_ts, (int, float))
+                or not math.isfinite(snapshot_ts) or snapshot_ts < 0):
+            raise ValueError("aircraft.json 缺少有效的快照时间 now")
+        self.last_poll_ts = now
+        # 重复或倒序快照不能刷新 last_seen、追加航迹或再次落盘。
+        if self.last_snapshot_ts is not None and snapshot_ts <= self.last_snapshot_ts:
+            return None
         aircraft = data.get("aircraft") or []
         self.messages_total = max(self.messages_total, int(data.get("messages") or 0))
-        self.last_poll_ts = now
-        # 落盘：每秒保存带时间戳的批次记录（含空批次以保证回放时间线真实完整）
+        # 使用解码器原始时刻；seen/seen_pos 均相对于该时刻，不能改成轮询时刻。
+        # 保留真实空快照，保证回放时间线完整。
         with_pos = [a for a in aircraft if a.get("lat") is not None and a.get("lon") is not None]
         record = {
-            "now": round(now, 3),
+            "now": snapshot_ts,
             "aircraft": with_pos,
         }
         line = json.dumps(record, separators=(",", ":")) + "\n"
         with open(self.tracks_file, "a", encoding="utf-8") as f:
             f.write(line)
+        self.last_snapshot_ts = snapshot_ts
         return with_pos
 
     # ------------------------------------------------------------------
