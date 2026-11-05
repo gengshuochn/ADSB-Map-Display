@@ -11,7 +11,13 @@
     displayNow: null,
     status: null,
     aircraft: new Map(),      // hex -> 最新记录
-    selected: null,           // 选中的 hex
+    selected: null,           // 当前显示源中的活动目标 hex
+    panelOpen: false,
+    panelTarget: null,        // 详情卡目标，失联或切换显示源时仍保留
+    panelRecord: null,
+    panelOrigin: null,
+    panelTrackCount: null,
+    selectionEpoch: 0,        // 同一 hex 关闭后重选，也不能接受旧轨迹响应
     follow: false,
     markers: new Map(),       // hex -> L.Marker
     trails: new Map(),        // hex -> {poly, pts: []}
@@ -196,13 +202,7 @@
     if (m) { map.removeLayer(m); S.markers.delete(hex); }
     const t = S.trails.get(hex);
     if (t) { map.removeLayer(t.poly); S.trails.delete(hex); }
-    if (S.selected === hex) {
-      if (S.selTrack) { map.removeLayer(S.selTrack); S.selTrack = null; }
-      S.selTrackCount = -1;
-      S.selected = null; // 清除已移除飞机的选中状态，防止幽灵航迹
-      $('ip-callsign').textContent = '（已失联）';
-      $('ip-seen').textContent = '—';
-    }
+    if (S.selected === hex) clearActiveSelection();
   }
 
   // ------------------------------------------------------------------
@@ -210,32 +210,65 @@
   // ------------------------------------------------------------------
   function selectHex(hex, opts) {
     opts = opts || {};
-    if (S.selected !== hex && S.selTrack) {
-      map.removeLayer(S.selTrack);
-      S.selTrack = null;
-    }
-    S.selected = hex;
+    if (!S.aircraft.has(hex)) return;
+    if (S.selected !== hex) clearActiveSelection();
+    S.panelOpen = true;
+    S.panelTarget = hex;
+    S.selectionEpoch++;
+    S.panelTrackCount = null;
     S.selTrackCount = -1;
     S.selTrackLastTs = 0;
-    $('infopanel').hidden = false;
-    updateSelectionVisual();
+    syncPanelSelection();
     refreshSelectedTrack(true);
+    scheduleFloatingLayout();
     if (opts.pan) {
       const rec = S.aircraft.get(hex);
       if (rec && rec.lat != null) map.panTo(GCJ.wgs2gcj(rec.lat, rec.lon), { animate: true });
     }
   }
 
-  function deselect() {
+  function clearActiveSelection() {
     S.selected = null;
     S.follow = false;
+    S.selectionEpoch++;
     S.selTrackCount = -1;
     S.selTrackLastTs = 0;
     $('ip-follow').classList.remove('active');
     $('ip-follow').textContent = '⊘ 跟随追踪';
-    $('infopanel').hidden = true;
     if (S.selTrack) { map.removeLayer(S.selTrack); S.selTrack = null; }
     updateSelectionVisual();
+  }
+
+  function deselect() {
+    clearActiveSelection();
+    S.panelOpen = false;
+    S.panelTarget = null;
+    S.panelRecord = null;
+    S.panelOrigin = null;
+    S.panelTrackCount = null;
+    $('infopanel').hidden = true;
+    // 关闭卡片后将键盘焦点放回地图，后续快照不会自动重新打开。
+    map.getContainer().focus({ preventScroll: true });
+  }
+
+  function syncPanelSelection() {
+    if (!S.panelOpen) return;
+    const rec = S.aircraft.get(S.panelTarget);
+    if (rec) {
+      if (S.selected !== S.panelTarget) {
+        clearActiveSelection();
+        S.selected = S.panelTarget;
+        S.panelTrackCount = null;
+      }
+      S.panelRecord = { ...rec };
+      S.panelOrigin = {
+        mode: S.mode, dataset: S.status.dataset, revision: S.revision, now: S.displayNow,
+      };
+      updateSelectionVisual();
+    } else if (S.selected) {
+      clearActiveSelection();
+    }
+    updateInfoPanel();
   }
 
   function updateSelectionVisual() {
@@ -249,12 +282,15 @@
     if (!S.selected) return;
     const reqHex = S.selected;
     const reqRevision = S.revision;
+    const reqEpoch = S.selectionEpoch;
     fetch('/api/track?hex=' + encodeURIComponent(reqHex))
       .then((r) => r.json())
       .then((trk) => {
         // 防乱序竞争：响应 hex 必须与当前选中的航空器严格一致
         if (!trk || S.selected !== trk.hex || S.selected !== reqHex ||
-            reqRevision !== S.revision || trk.display_revision !== S.revision) return;
+            reqRevision !== S.revision || trk.display_revision !== S.revision ||
+            reqEpoch !== S.selectionEpoch || !S.panelOpen) return;
+        S.panelTrackCount = trk.count;
         if (trk.count === 0 || !trk.points || trk.points.length === 0) {
           $('ip-trackpts').textContent = '0';
           if (S.selTrack) { map.removeLayer(S.selTrack); S.selTrack = null; }
@@ -286,13 +322,24 @@
   // 信息面板
   // ------------------------------------------------------------------
   function updateInfoPanel() {
-    if (!S.selected) return;
-    const rec = S.aircraft.get(S.selected);
-    if (!rec) {
-      $('ip-callsign').textContent = '（已失联）';
-      $('ip-seen').textContent = '—';
-      return;
-    }
+    if (!S.panelOpen || !S.panelRecord) return;
+    $('infopanel').hidden = false;
+    const rec = S.panelRecord;
+    const active = S.selected === S.panelTarget && S.aircraft.has(S.panelTarget);
+    const origin = S.panelOrigin;
+    const changed = origin.revision !== S.revision;
+    $('ip-state').textContent = active ? (S.mode === 'live' ? '实时目标' : '回放目标') :
+      (changed ? '来源 / 时刻已变化' : '已失联');
+    $('ip-state').classList.toggle('cached', !active);
+    $('ip-origin').textContent = `${origin.mode === 'live' ? '实时' : '回放'} · ${origin.dataset || '未命名数据集'}`;
+    const timestamp = Number.isFinite(origin.now) ? origin.now : rec.last_update;
+    const time = Number.isFinite(timestamp) ? new Date(timestamp * 1000) : null;
+    $('ip-time').textContent = time ? time.toISOString().slice(5, 19).replace('T', ' ') + ' UTC' : '时间未知';
+    $('ip-follow').disabled = !active;
+    const hasPosition = Number.isFinite(rec.lat) && Number.isFinite(rec.lon);
+    $('ip-center').disabled = !hasPosition;
+    $('ip-center').textContent = active ? '⌖ 定位到中心' : '⌖ 定位到最后位置';
+    $('ip-trackpts').textContent = S.panelTrackCount == null ? '—' : String(S.panelTrackCount);
     $('ip-callsign').textContent = rec.flight || '——';
     $('ip-hex').textContent = rec.hex.toUpperCase();
     $('ip-squawk').textContent = rec.squawk ? 'SQR ' + rec.squawk : '';
@@ -314,7 +361,7 @@
       ? rec.dist_km.toFixed(1) + ' km / ' + fmtNum(rec.bearing, '°') : '—';
     $('ip-rssi').textContent = rec.rssi != null ? Number(rec.rssi).toFixed(1) + ' dBFS' : '—';
     $('ip-msgs').textContent = rec.messages != null ? String(rec.messages) : '—';
-    $('ip-seen').textContent = rec.age != null ? rec.age.toFixed(1) + ' s 前' : '—';
+    $('ip-seen').textContent = active && rec.age != null ? rec.age.toFixed(1) + ' s 前' : '最后快照';
     // 机型图标旋转与颜色
     const svg = document.querySelector('.ip-plane');
     if (svg) {
@@ -399,15 +446,17 @@
     });
     $('tab-' + tab).addEventListener('keydown', (e) => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
-      const other = $('tab-' + (tab === 'flights' ? 'situation' : 'flights'));
+      const target = e.key === 'Home' ? 'flights' : e.key === 'End' ? 'situation' :
+        (tab === 'flights' ? 'situation' : 'flights');
+      const other = $('tab-' + target);
       other.click(); other.focus(); e.preventDefault();
     });
   });
   function setSidebar(collapsed) {
     $('sidebar-frame').classList.toggle('collapsed', collapsed);
-    $('sidebar-toggle').textContent = collapsed ? '›' : '‹';
     $('sidebar-toggle').setAttribute('aria-expanded', String(!collapsed));
     $('sidebar-toggle').setAttribute('aria-label', collapsed ? '展开侧栏' : '收起侧栏');
+    $('sidebar-toggle').title = collapsed ? '展开侧栏' : '收起侧栏';
     $('sidebar').inert = collapsed;
     try { localStorage.setItem('adsb-sidebar', collapsed ? 'collapsed' : 'expanded'); } catch (e) {}
   }
@@ -429,10 +478,11 @@
     S.revision = st.status.display_revision;
     S.displayNow = st.now;
     if (changed) {
-      deselect();
+      clearActiveSelection();
       for (const hx of Array.from(S.markers.keys())) removeMarker(hx);
       S.aircraft.clear();
       updateList();
+      updateInfoPanel();
     }
     const receiver = st.status.receiver;
     if (receiver && (JSON.stringify(receiver) !== S.receiverKey)) {
@@ -470,8 +520,8 @@
       if (!alive.has(hx)) { S.aircraft.delete(hx); removeMarker(hx); }
     }
 
+    syncPanelSelection();
     updateList();
-    updateInfoPanel();
     updateSituation();
     if (S.selected) refreshSelectedTrack(false);
     if (S.follow && S.selected) {
@@ -568,6 +618,34 @@
   // ------------------------------------------------------------------
   // 暂停显示 / 终止系统
   // ------------------------------------------------------------------
+  let pauseReminderHold = null;
+  let pauseReminderHide = null;
+  function hidePauseReminder() {
+    clearTimeout(pauseReminderHold);
+    clearTimeout(pauseReminderHide);
+    pauseReminderHold = null;
+    pauseReminderHide = null;
+    const toast = $('pause-required-toast');
+    toast.hidden = true;
+    toast.classList.remove('fading');
+    toast.textContent = '';
+  }
+  function showPauseReminder() {
+    // 重复点击复用同一条提示，从最后一次点击重新计算完整停留时间。
+    hidePauseReminder();
+    const toast = $('pause-required-toast');
+    toast.hidden = false;
+    toast.textContent = '请先暂停显示';
+    pauseReminderHold = setTimeout(() => {
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        hidePauseReminder();
+        return;
+      }
+      toast.classList.add('fading');
+      pauseReminderHide = setTimeout(hidePauseReminder, 200);
+    }, 1000);
+  }
+
   // 暂停采集映射与暂停回放使用不同语义。
   function updatePausedBanner(paused) {
     const btn = $('btn-pause');
@@ -575,7 +653,9 @@
     $('pause-banner').classList.toggle('visible', bannerVisible);
     $('pause-banner').setAttribute('aria-hidden', String(!bannerVisible));
     $('pause-banner').inert = !bannerVisible;
-    $('btn-mode').disabled = !(S.mode === 'replay' || paused);
+    if (bannerVisible) scheduleFloatingLayout();
+    $('btn-mode').disabled = !S.status || !['live', 'replay'].includes(S.mode);
+    if (bannerVisible || S.mode === 'replay') hidePauseReminder();
     if (S.mode === 'replay') {
       const srcPaused = S.status && S.status.source && S.status.source.paused;
       btn.classList.toggle('paused', !!srcPaused);
@@ -617,6 +697,7 @@
   const modalFocus = new Map();
   const modalIds = ['warmup-overlay', 'shutdown-modal', 'shutdown-done', 'dataset-modal'];
   function showModal(id) {
+    hidePauseReminder();
     const el = $(id);
     if (!el.hidden) return;
     closeSearch();
@@ -721,7 +802,15 @@
     } catch (err) { $('dataset-error').textContent = err.message; }
     finally { datasetBusy = false; updateDatasetButtons(); }
   }
-  ['btn-mode', 'banner-mode', 'sd-mode'].forEach((id) => $(id).addEventListener('click', openDatasetModal));
+  $('btn-mode').addEventListener('click', () => {
+    if (!S.status || !['live', 'replay'].includes(S.mode)) return;
+    if (S.mode === 'live' && !S.status.display_paused) {
+      showPauseReminder();
+      return;
+    }
+    openDatasetModal();
+  });
+  ['banner-mode', 'sd-mode'].forEach((id) => $(id).addEventListener('click', openDatasetModal));
   $('banner-resume').addEventListener('click', () => post('/api/display/resume'));
   $('ds-cancel').addEventListener('click', () => hideModal('dataset-modal'));
   $('ds-live').addEventListener('click', () => switchDisplay(true));
@@ -906,11 +995,33 @@
   window.addEventListener('resize', scheduleUILayout);
   scheduleUILayout();
 
+  let floatingFrame = 0;
+  function layoutFloatingPanels() {
+    floatingFrame = 0;
+    $('pause-banner').style.top = topbar.getBoundingClientRect().bottom + 10 + 'px';
+    const wrap = $('map-wrap').getBoundingClientRect();
+    const controls = document.querySelector('.leaflet-top.leaflet-right');
+    const bottom = controls ? controls.getBoundingClientRect().bottom : wrap.top;
+    const top = Math.max(12, Math.ceil(bottom - wrap.top) + 12);
+    $('infopanel').style.top = top + 'px';
+    $('infopanel').style.maxHeight = Math.max(0, Math.floor(wrap.height - top - 12)) + 'px';
+  }
+  function scheduleFloatingLayout() {
+    if (!floatingFrame) floatingFrame = requestAnimationFrame(layoutFloatingPanels);
+  }
+  const floatingObserver = new ResizeObserver(scheduleFloatingLayout);
+  [topbar, $('map-wrap'), document.querySelector('.leaflet-top.leaflet-right')].forEach((el) => {
+    if (el) floatingObserver.observe(el);
+  });
+  window.addEventListener('resize', scheduleFloatingLayout);
+  scheduleFloatingLayout();
+
   // ------------------------------------------------------------------
   // 信息面板按钮
   // ------------------------------------------------------------------
   $('ip-close').addEventListener('click', deselect);
   $('ip-follow').addEventListener('click', () => {
+    if (!S.selected || !S.aircraft.has(S.selected)) return;
     S.follow = !S.follow;
     $('ip-follow').classList.toggle('active', S.follow);
     $('ip-follow').textContent = S.follow ? '✔ 跟随中(点击取消)' : '⊘ 跟随追踪';
@@ -920,9 +1031,8 @@
     }
   });
   $('ip-center').addEventListener('click', () => {
-    if (!S.selected) return;
-    const rec = S.aircraft.get(S.selected);
-    if (rec && rec.lat != null) map.setView(GCJ.wgs2gcj(rec.lat, rec.lon), Math.max(map.getZoom(), 9));
+    const rec = S.panelRecord;
+    if (rec && Number.isFinite(rec.lat) && Number.isFinite(rec.lon)) map.setView(GCJ.wgs2gcj(rec.lat, rec.lon), Math.max(map.getZoom(), 9));
   });
 
   // ------------------------------------------------------------------

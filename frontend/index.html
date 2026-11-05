@@ -17,11 +17,14 @@
 </script>
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="css/style.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%234d8dff' d='M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23d1a078' d='M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z'/%3E%3C/svg%3E">
 </head>
 <body>
 <header id="topbar">
   <div class="brand">
+    <button id="sidebar-toggle" class="sysbtn sysbtn-icon" title="收起侧栏" aria-label="收起侧栏" aria-expanded="true" aria-controls="sidebar">
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M9 4v16"/></svg>
+    </button>
     <svg viewBox="0 0 24 24" class="brand-icon"><path fill="currentColor" d="M12 2 L13.5 10 L22 14 L22 16 L13.5 13.5 L13 19 L16 21.5 L16 23 L12 21.8 L8 23 L8 21.5 L11 19 L10.5 13.5 L2 16 L2 14 L10.5 10 Z"/></svg>
     <span class="brand-name">ADS-B <b>Display</b></span>
     <span id="mode-badge" class="badge badge-live" title="数据模式">LIVE</span>
@@ -62,6 +65,7 @@
 </header>
 
 <div id="search-popover" hidden></div>
+<div id="pause-required-toast" role="status" aria-live="polite" aria-atomic="true" hidden></div>
 <div id="pause-banner" role="status" aria-hidden="true">
   <span>前端显示已中断，后端数据收集进行中</span>
   <div><button id="banner-resume" class="btn">继续显示</button><button id="banner-mode" class="btn">切换模式</button></div>
@@ -97,17 +101,16 @@
     </div>
   </aside>
     </div>
-    <button id="sidebar-toggle" aria-label="收起侧栏" aria-expanded="true" aria-controls="sidebar">‹</button>
   </div>
 
   <section id="map-wrap">
     <div id="map"></div>
 
-    <div id="infopanel" hidden>
-      <button id="ip-close" title="关闭">×</button>
+    <section id="infopanel" hidden aria-label="航空器详情">
+      <button id="ip-close" title="关闭详情" aria-label="关闭航空器详情">×</button>
       <div class="ip-head">
         <svg viewBox="-52 -52 104 104" class="ip-plane"><path id="ip-plane-path" fill="currentColor" d="M0,-46 C2,-46 4,-44 4.5,-40 L6,-18 L44,2 L44,10 L6,-2 L4.5,22 L16,32 L16,38 L0,34 L-16,38 L-16,32 L-4.5,22 L-6,-2 L-44,10 L-44,2 L-6,-18 L-4.5,-40 C-4,-44 -2,-46 0,-46 Z"/></svg>
-        <div>
+        <div class="ip-title">
           <div id="ip-callsign" class="ip-callsign">------</div>
           <div class="ip-sub"><span id="ip-hex" class="mono">hex</span>
             <span id="ip-squawk" class="chip">squawk</span>
@@ -116,7 +119,12 @@
           </div>
         </div>
       </div>
-      <div class="ip-grid">
+      <div class="ip-context">
+        <span id="ip-state" class="chip">—</span>
+        <span id="ip-origin"></span>
+        <time id="ip-time" title="此详情最近一次更新的数据时间"></time>
+      </div>
+      <div class="ip-grid" tabindex="0" role="region" aria-label="航空器详细参数">
         <div class="cell"><label>气压高度</label><b id="ip-altb">—</b></div>
         <div class="cell"><label>几何高度</label><b id="ip-altg">—</b></div>
         <div class="cell"><label>地速</label><b id="ip-gs">—</b></div>
@@ -136,7 +144,7 @@
         <button id="ip-follow" class="btn">⊘ 跟随追踪</button>
         <button id="ip-center" class="btn">⌖ 定位到中心</button>
       </div>
-    </div>
+    </section>
 
     <div id="map-legend">
       <span class="lg"><i style="background:#eceff1"></i>地面</span>

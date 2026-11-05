@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-from . import config
+from . import config, __version__
 from .dataset import scan_replay_datasets
 from .state import AircraftStore
 from .replay import ReplaySource
@@ -203,7 +203,7 @@ class AppContext:
 class Handler(BaseHTTPRequestHandler):
     ctx: AppContext  # 由 make_server 注入（类变量）
     protocol_version = "HTTP/1.1"
-    server_version = "ADS-BDisplay/1.0"
+    server_version = f"ADS-BDisplay/{__version__}"
 
     # ------------------------------------------------------------------
     def log_message(self, fmt, *args):  # noqa: N802

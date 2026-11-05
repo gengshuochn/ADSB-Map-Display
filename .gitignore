@@ -12,6 +12,7 @@ __pycache__/
 # ---- 本地笔记与本地测试（不入库）----
 TODO.md
 tests/
+regression_tests/
 
 # ---- 编辑器 / 操作系统 ----
 .vscode/
