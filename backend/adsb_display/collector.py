@@ -25,6 +25,7 @@ class LiveCollector:
         gain: float = config.DEFAULT_GAIN,
         ppm: int = config.DEFAULT_PPM,
         max_range: int = config.DEFAULT_MAX_RANGE_KM,
+        desktop_managed: bool = False,
     ):
         self.ds = ds
         self.lat = lat
@@ -32,6 +33,7 @@ class LiveCollector:
         self.gain = gain
         self.ppm = ppm
         self.max_range = max_range
+        self.desktop_managed = desktop_managed
 
         self.proc: subprocess.Popen | None = None
         self._stop = threading.Event()
@@ -81,12 +83,13 @@ class LiveCollector:
     def _spawn(self) -> bool:
         try:
             with open(self.readsb_log, "ab") as lf:
+                start_new_session = not self.desktop_managed
                 self.proc = subprocess.Popen(
                     self._readsb_cmd(),
                     stdout=lf,
                     stderr=lf,
                     stdin=subprocess.DEVNULL,
-                    start_new_session=True,
+                    start_new_session=start_new_session,
                 )
             log.info("readsb 已启动 pid=%s (gain=%s lat=%.5f lon=%.5f)", self.proc.pid, self.gain, self.lat, self.lon)
             return True

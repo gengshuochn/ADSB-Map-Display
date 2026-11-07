@@ -275,7 +275,24 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         if path == "/api/system/shutdown":
-            log.info("收到前端终止请求，正在关闭服务…")
+            req_session = None
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if 0 < length <= 65536:
+                    body = json.loads(self.rfile.read(length))
+                    if isinstance(body, dict):
+                        req_session = body.get("session_id")
+            except Exception:
+                pass
+            if not req_session:
+                req_session = self.headers.get("X-Session-ID")
+            ctx_session = getattr(self.ctx, "session_id", None)
+            if req_session and ctx_session and req_session != ctx_session:
+                log.warning("收到过期的 shutdown 请求 (expect=%s, got=%s)，忽略以防误杀新会话",
+                            ctx_session, req_session)
+                self._json({"ok": False, "error": "session mismatch"}, 409)
+                return
+            log.info("收到前端/桌面端终止请求，正在关闭服务…")
             self._json({"ok": True, "message": "shutting down"})
             threading.Thread(target=self.ctx.shutdown_cb, daemon=True).start()
             return
@@ -390,8 +407,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, fp.read_bytes(), ctype)
 
 
-def make_server(ctx: AppContext, port: int) -> ThreadingHTTPServer:
+def make_server(ctx: AppContext, port: int, host: str = "0.0.0.0") -> ThreadingHTTPServer:
     handler = type("BoundHandler", (Handler,), {"ctx": ctx})
-    httpd = ThreadingHTTPServer(("0.0.0.0", port), handler)
+    httpd = ThreadingHTTPServer((host, port), handler)
     httpd.daemon_threads = True
     return httpd

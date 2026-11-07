@@ -8,14 +8,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import signal
 import sys
 import threading
 import time
 
+from pathlib import Path
+
 from . import config
-from .dataset import create_dataset, scan_replay_datasets, write_meta_update
+from .dataset import create_dataset, inspect_dataset_dir, scan_replay_datasets, write_meta_update
 from .state import AircraftStore
 from .server import AppContext, make_server
 from .collector import LiveCollector
@@ -39,16 +43,29 @@ def setup_logging() -> None:
 
 
 def pick_replay_dataset(name: str | None):
-    cands = scan_replay_datasets()
-    if not cands:
-        return None
     if name:
-        clean_name = name.strip("/ ").split("/")[-1]
+        target_path = Path(name)
+        # 1. 优先判定是否为显式指定的外部或相对/绝对目录路径
+        if "/" in name or target_path.is_dir() or target_path.exists():
+            if not target_path.is_dir():
+                raise SystemExit(f"指定的数据集路径不是有效目录: {name}")
+            ds = inspect_dataset_dir(target_path)
+            if ds is None:
+                raise SystemExit(f"目录 {name} 不是有效的数据集格式（需包含 logs/tracks-*.jsonl 或 live/history_*.json）")
+            return ds
+
+        # 2. 纯名称匹配（在项目 data/ 内匹配）
+        cands = scan_replay_datasets()
+        clean_name = name.strip("/ ")
         for c in cands:
             if c.name == clean_name:
                 return c
         raise SystemExit(f"未找到可回放数据集: {name}（可用: {[c.name for c in cands]}）")
-    # 默认选字节量最大的（数据最丰富）
+
+    # 3. 未指定时在 data/ 中挑选数据最丰富的数据集
+    cands = scan_replay_datasets()
+    if not cands:
+        return None
     return max(cands, key=lambda c: c.total_bytes)
 
 
@@ -108,7 +125,8 @@ def cmd_serve(args) -> int:
             write_meta_update(ds, started_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                               duration_s=args.duration or None)
             warmup.set("initializing", f"数据集 data/{ds.name} 就绪，启动 readsb…")
-            src = LiveCollector(ds, receiver["lat"], receiver["lon"], gain=args.gain)
+            src = LiveCollector(ds, receiver["lat"], receiver["lon"], gain=args.gain,
+                                desktop_managed=getattr(args, "desktop_managed", False))
 
             def _live_batch(recs, now):
                 # 显示暂停时: 落盘与状态库照常, 但不对外可见（snapshot 由 SSE 侧拦截）
@@ -144,23 +162,15 @@ def cmd_serve(args) -> int:
     http_thread = None
     source = None
     try:
-        if args.mode == "live" and src is not None:
-            df17_counter.start()
-            src.start()
-            source = src
-            warmup.set("collecting", "正在收集数据… 等待报文")
-        else:
-            source = src
-
+        source = src
         ctx = AppContext(
             mode=args.mode, store=store, source=source, receiver=receiver,
             dataset_name=dataset_name, warmup=warmup, df17_counter=df17_counter,
             shutdown_cb=shutdown_event.set,
         )
-        if args.mode == "replay":
-            source.start()
-        httpd = make_server(ctx, args.port)
-        log.info("服务已启动: http://127.0.0.1:%d  (mode=%s dataset=%s)", args.port, args.mode, dataset_name)
+        http_host = getattr(args, "host", "0.0.0.0")
+        httpd = make_server(ctx, args.port, host=http_host)
+        log.info("服务已启动: http://%s:%d  (mode=%s dataset=%s)", http_host, args.port, args.mode, dataset_name)
 
         def _sig(_sig, _frm):
             shutdown_event.set()
@@ -170,6 +180,39 @@ def cmd_serve(args) -> int:
 
         http_thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
         http_thread.start()
+
+        if args.mode == "live" and src is not None:
+            df17_counter.start()
+            src.start()
+            warmup.set("collecting", "正在收集数据… 等待报文")
+        elif args.mode == "replay" and source is not None:
+            source.start()
+
+        if getattr(args, "desktop_managed", False):
+            def _stdin_monitor():
+                try:
+                    while True:
+                        ch = sys.stdin.read(1)
+                        if not ch:
+                            log.info("检测到父进程管道关闭 (EOF)，触发退出…")
+                            shutdown_event.set()
+                            break
+                except Exception as exc:
+                    log.warning("父进程管道监控异常: %s", exc)
+                    shutdown_event.set()
+
+            stdin_thread = threading.Thread(target=_stdin_monitor, name="adsb-stdin-monitor", daemon=True)
+            stdin_thread.start()
+
+        if getattr(args, "ready_json", False):
+            ready_info = {
+                "host": http_host,
+                "port": args.port,
+                "pid": os.getpid(),
+                "session_id": ctx.session_id,
+            }
+            sys.stdout.write(f"ADSB_READY {json.dumps(ready_info)}\n")
+            sys.stdout.flush()
 
         deadline = time.time() + args.duration if args.duration else None
         # 主循环: 响应前端终止请求 / 信号 / 定时时长
@@ -181,10 +224,9 @@ def cmd_serve(args) -> int:
     finally:
         log.info("正在停止服务…")
         if httpd is not None:
-            httpd.shutdown()
-        if http_thread is not None:
-            http_thread.join(timeout=3)
-        if httpd is not None:
+            if http_thread is not None and http_thread.is_alive():
+                httpd.shutdown()
+                http_thread.join(timeout=3)
             httpd.server_close()
         if ctx is not None:
             ctx.close()
@@ -208,6 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("serve", help="启动采集/回放 + Web 服务")
     sp.add_argument("--mode", choices=["live", "replay"], default="live")
+    sp.add_argument("--host", type=str, default="0.0.0.0", help="HTTP 绑定地址 (默认 0.0.0.0)")
     sp.add_argument("--port", type=int, default=config.HTTP_PORT)
     sp.add_argument("--duration", type=int, default=0, help="运行秒数，0=持续运行")
     sp.add_argument("--lat", type=float, default=None)
@@ -216,6 +259,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dataset", type=str, default=None, help="回放数据集名")
     sp.add_argument("--speed", type=float, default=1.0)
     sp.add_argument("--no-loop", action="store_true")
+    sp.add_argument("--ready-json", action="store_true", help="服务就绪时向标准输出写入单行 JSON 记录")
+    sp.add_argument("--desktop-managed", action="store_true", help="启用桌面托管模式（父进程存活检测与进程组管理）")
 
     sub.add_parser("list-datasets", help="列出可回放数据集")
     return p

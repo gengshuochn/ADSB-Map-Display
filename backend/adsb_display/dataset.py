@@ -169,6 +169,43 @@ def _has_history_records(p: Path) -> bool:
     return False
 
 
+def inspect_dataset_dir(d: Path) -> ReplayDataset | None:
+    """检查并构造单个指定目录的数据集对象。若有效则返回 ReplayDataset，否则返回 None。"""
+    if not d.is_dir():
+        return None
+    tracks_candidates = sorted((d / "logs").glob("tracks-*.jsonl")) if (d / "logs").is_dir() else []
+    history_candidates = sorted((d / "live").glob("history_*.json"), key=_history_file_now) if (d / "live").is_dir() else []
+
+    valid_tracks = [f for f in tracks_candidates if _has_track_records(f)]
+    has_history = any(_has_history_records(f) for f in history_candidates)
+
+    if valid_tracks:
+        files = valid_tracks
+        kind = "tracks"
+    elif has_history:
+        # history 文件按快照 now 排序，滤除 0 字节空文件
+        files = [f for f in history_candidates if f.stat().st_size > 0]
+        kind = "history"
+    else:
+        return None
+
+    try:
+        meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        if not isinstance(meta, dict):
+            meta = {}
+    except (OSError, ValueError):
+        meta = {}
+
+    return ReplayDataset(
+        name=d.name,
+        meta=meta,
+        root=d,
+        files=files,
+        kind=kind,
+        total_bytes=sum(f.stat().st_size for f in files),
+    )
+
+
 def scan_replay_datasets(data_root: Path | None = None) -> list[ReplayDataset]:
     """扫描 data/ 下可回放的数据集目录。"""
     data_root = data_root or config.DATA_DIR
@@ -176,37 +213,7 @@ def scan_replay_datasets(data_root: Path | None = None) -> list[ReplayDataset]:
     if not data_root.is_dir():
         return sorted(out, key=lambda ds: ds.sort_key)
     for d in sorted(data_root.iterdir()):
-        if not d.is_dir():
-            continue
-        tracks_candidates = sorted((d / "logs").glob("tracks-*.jsonl")) if (d / "logs").is_dir() else []
-        history_candidates = sorted((d / "live").glob("history_*.json"), key=_history_file_now) if (d / "live").is_dir() else []
-
-        valid_tracks = [f for f in tracks_candidates if _has_track_records(f)]
-        has_history = any(_has_history_records(f) for f in history_candidates)
-
-        if valid_tracks:
-            files = valid_tracks
-            kind = "tracks"
-        elif has_history:
-            # history 文件按快照 now 排序，滤除 0 字节空文件
-            files = [f for f in history_candidates if f.stat().st_size > 0]
-            kind = "history"
-        else:
-            continue
-        try:
-            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-            if not isinstance(meta, dict):
-                meta = {}
-        except (OSError, ValueError):
-            meta = {}
-        out.append(
-            ReplayDataset(
-                name=d.name,
-                meta=meta,
-                root=d,
-                files=files,
-                kind=kind,
-                total_bytes=sum(f.stat().st_size for f in files),
-            )
-        )
+        ds = inspect_dataset_dir(d)
+        if ds is not None:
+            out.append(ds)
     return sorted(out, key=lambda ds: ds.sort_key)

@@ -1,7 +1,10 @@
 # ---- 运行时数据（采集的数据集不入库，运行时自动重建目录）----
 data/
 logs/
+runtime/
 nohup.out
+*.log
+.cache/
 
 # ---- Python ----
 .venv/
@@ -13,6 +16,10 @@ __pycache__/
 TODO.md
 tests/
 regression_tests/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # ---- 编辑器 / 操作系统 ----
 .vscode/

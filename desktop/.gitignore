@@ -1,0 +1,11 @@
+# 桌面子项目运行与缓存隔离
+.venv/
+.cache/
+logs/
+runtime/
+__pycache__/
+*.py[cod]
+
+# 本地测试与缓存（不入库）
+tests/
+.pytest_cache/
